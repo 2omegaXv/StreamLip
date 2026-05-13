@@ -1,0 +1,6 @@
+.claude
+*.log
+*.out
+*.aux
+*.bbl
+*.blg
