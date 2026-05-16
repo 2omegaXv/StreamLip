@@ -1,0 +1,36 @@
+# ── Setup ─────────────────────────────────────────────────────────────────────
+# 1. 创建 venv:  uv venv .venv --python 3.10
+# 2. 装 torch (Aliyun pytorch mirror):
+#    .venv/bin/pip install \
+#      https://mirrors.aliyun.com/pytorch-wheels/cu128/torch-2.7.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl \
+#      https://mirrors.aliyun.com/pytorch-wheels/cu128/torchaudio-2.7.1+cu128-cp310-cp310-manylinux_2_28_x86_64.whl
+# 3. 其余包:  .venv/bin/pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
+#    （跳过 torch/torchaudio 这两行，或用 --ignore-requires-python）
+
+# ── Core ML ──────────────────────────────────────────────────────────────────
+# torch==2.7.1+cu128    # 见上方步骤 2
+# torchaudio==2.7.1+cu128
+
+# ── Transformers ecosystem ────────────────────────────────────────────────────
+transformers>=4.47.0        # SmolLM2, Mimi codec
+peft>=0.14.0                # LoRA for SmolLM2
+accelerate>=1.2.0           # mixed precision, device placement
+huggingface-hub>=0.26.0
+
+# ── Visual encoder ────────────────────────────────────────────────────────────
+fairseq                     # AV-HuBERT checkpoint loading (fairseq format)
+
+# ── Audio / Video ─────────────────────────────────────────────────────────────
+av                          # PyAV: decode .mp4 from LRS3
+opencv-python-headless      # face/lip crop preprocessing
+librosa                     # audio utils (resample, mel)
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+einops>=0.8.0               # rearrange/repeat for attention ops
+numpy<2.0                   # fairseq compatibility
+tqdm
+wandb                       # experiment tracking
+
+# ── Config ────────────────────────────────────────────────────────────────────
+omegaconf>=2.3.0
+hydra-core>=1.3.0

@@ -1,6 +1,11 @@
-.claude
+.claude/
 *.log
 *.out
 *.aux
 *.bbl
 *.blg
+CLAUDE.md
+data/lrs3
+data/processed/
+pretrained/
+__pycache__
