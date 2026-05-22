@@ -77,17 +77,10 @@ class StreamLipV2(nn.Module):
         # ── Audio path (Phase 2 only) ─────────────────────────────────────────
         loss_fm = posterior.new_zeros(())
         if latent is not None:
-            id_vec = self.speaker_encoder(face)             # (B, 256)
-
-            # Downsample 2×: video (25fps) → latent (12.5fps)
-            # stop-gradient: FM loss must NOT back-prop into VisualEncoder or LM
-            v_down = vis_feat.detach()[:, ::2, :]           # (B, T_a, 960)
-            h_down = h_lm.detach()[:, ::2, :]               # (B, T_a, 960)
-
-            loss_fm = self.fm_head.forward_train(
-                v_down, h_down, id_vec,
-                latent.float(),
-            )
+            id_vec = self.speaker_encoder(face)
+            v_down = vis_feat.detach()[:, ::2, :]   # (B, T_a, 960)
+            h_down = h_lm.detach()[:, ::2, :]       # (B, T_a, 960)
+            loss_fm = self.fm_head.forward_train(v_down, h_down, id_vec, latent.float())
 
         loss = loss_fm + self.lambda_text * loss_text
 

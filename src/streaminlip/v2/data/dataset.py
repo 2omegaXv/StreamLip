@@ -78,16 +78,29 @@ class LRS3DatasetV2(Dataset):
         return len(self.clips)
 
     def _frame_labels(self, words: list, T: int, start: int = 0) -> np.ndarray:
+        """
+        Assign all BPE tokens of each word to frames using word timestamps,
+        weighted by character count (proportional to phonetic duration).
+        e.g. MARRIAGE → [▁MAR(37%), RIAGE(63%)] distributed across the word's frames.
+        """
         labels = np.full(T, SIL_ID, dtype=np.int64)
         for w in words:
-            f0 = int(w["start"] * FPS) - start
-            f1 = min(int(w["end"] * FPS) - start, T)
-            if f0 >= f1 or f1 <= 0 or f0 >= T:
+            toks = self.tokenizer.encode(w["word"], add_special_tokens=False)
+            if not toks:
                 continue
-            f0 = max(f0, 0)
-            tok = self.tokenizer.encode(w["word"], add_special_tokens=False)
-            if tok:
-                labels[f0:f1] = tok[0]
+            dur        = w["end"] - w["start"]
+            tok_strs   = [self.tokenizer.decode([t]).strip() for t in toks]
+            char_counts = [max(len(s), 1) for s in tok_strs]
+            total_chars = sum(char_counts)
+            cumulative  = 0
+            for tok_id, n_chars in zip(toks, char_counts):
+                t0 = w["start"] + dur * cumulative / total_chars
+                t1 = t0 + dur * n_chars / total_chars
+                f0 = max(0, int(t0 * FPS) - start)
+                f1 = min(T, int(t1 * FPS) - start)
+                if f0 < f1:
+                    labels[f0:f1] = tok_id
+                cumulative += n_chars
         return labels
 
     def __getitem__(self, idx: int) -> dict:
@@ -136,36 +149,35 @@ class LRS3DatasetV2(Dataset):
         else:
             face = torch.zeros(3, 256, 256, dtype=torch.float32)
 
-        # ── frame labels & teacher-forcing ids ────────────────────────────────
-        meta   = json.loads((clip_dir / "text.json").read_text())
-        labels = self._frame_labels(meta.get("words", []), T, start=start)
-        text_ids = np.concatenate([[self.bos_id], labels[:-1]])
+        # ── frame labels & teacher-forcing ids ───────────────────────────────
+        meta     = json.loads((clip_dir / "text.json").read_text())
+        labels   = self._frame_labels(meta.get("words", []), T, start=start)  # (T,)
+        text_ids = np.concatenate([[self.bos_id], labels[:-1]])               # (T,)
 
         # ── latent (Phase 2) ──────────────────────────────────────────────────
         if self.load_latent:
-            latent  = np.load(str(clip_dir / "latent.npz"))["latent"]
-            ta0     = start // 2
-            T_a     = T // 2
-            latent  = torch.from_numpy(latent[ta0:ta0 + T_a].copy())
+            latent = np.load(str(clip_dir / "latent.npz"))["latent"]
+            ta0    = start // 2
+            T_a    = T // 2
+            latent = torch.from_numpy(latent[ta0:ta0 + T_a].copy())
         else:
             latent = torch.zeros(0, 512, dtype=torch.float16)
 
         return {
-            "visual":       visual,           # (T, 768) pre-extracted  OR  (T, 3, 96, 96) raw
+            "visual":       visual[:T],
             "face":         face,
-            "text_ids":     torch.from_numpy(text_ids),
-            "frame_labels": torch.from_numpy(labels),
+            "text_ids":     torch.from_numpy(text_ids),     # (T,)
+            "frame_labels": torch.from_numpy(labels),       # (T,)
             "mask":         torch.ones(T, dtype=torch.bool),
             "latent":       latent,
         }
 
 
 def collate_fn(batch: list[dict]) -> dict:
-    """Pad all variable-length sequences to the longest in the batch."""
     max_T  = max(b["visual"].shape[0] for b in batch)
     max_Ta = max(b["latent"].shape[0] for b in batch)
     B      = len(batch)
-    vis_shape = batch[0]["visual"].shape[1:]   # (768,) or (3, 96, 96)
+    vis_shape = batch[0]["visual"].shape[1:]
 
     visual       = torch.zeros(B, max_T, *vis_shape)
     face         = torch.stack([b["face"] for b in batch])
@@ -186,10 +198,6 @@ def collate_fn(batch: list[dict]) -> dict:
             latent[i, :Ta]  = b["latent"]
 
     return {
-        "visual":       visual,
-        "face":         face,
-        "text_ids":     text_ids,
-        "frame_labels": frame_labels,
-        "mask":         mask,
-        "latent":       latent,
+        "visual": visual, "face": face, "text_ids": text_ids,
+        "frame_labels": frame_labels, "mask": mask, "latent": latent,
     }

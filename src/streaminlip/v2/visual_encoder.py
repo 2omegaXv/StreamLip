@@ -115,6 +115,7 @@ class VisualEncoderV2(nn.Module):
         chunk_size: int = CHUNK_SIZE,
     ):
         super().__init__()
+        self.chunk_size  = chunk_size
         self.av_hubert   = AVHuBERTExtractor(avhubert_ckpt, device="cpu")
         self.conformer   = ConformerAdapter(n_conformer_layers, chunk_size)
         self.visual_head = nn.Linear(BACKBONE_DIM, VOCAB_SIZE, bias=False)
@@ -124,13 +125,13 @@ class VisualEncoderV2(nn.Module):
         x: (B, T, 3, 96, 96) raw lip frames  — runs AV-HuBERT internally
            OR (B, T, 768)     pre-extracted   — skips AV-HuBERT (fast path)
         returns:
-          vis_feat (B, T, 960)   — continuous representation ṽ_t, used as FM condition
-          s_vis    (B, T, 49152) — visual logits log p(x_t | v_t)
+          vis_feat (B, T, 960)   — frame-level, used as FM condition
+          s_vis    (B, T, 49152) — frame-level visual logits
         """
         if x.dim() == 5:
-            feats = self.av_hubert(x)        # raw frames → (B, T, 768)
+            feats = self.av_hubert(x)
         else:
-            feats = x                        # pre-extracted, already (B, T, 768)
-        vis_feat = self.conformer(feats)     # (B, T, 960)
-        s_vis    = self.visual_head(vis_feat)  # (B, T, 49152)
+            feats = x
+        vis_feat = self.conformer(feats)      # (B, T, 960)
+        s_vis    = self.visual_head(vis_feat) # (B, T, 49152)
         return vis_feat, s_vis

@@ -35,21 +35,21 @@ def majority_token(token_ids: list[int]) -> int:
 def decode_by_word_boundaries(pred_ids: list[int], words: list[dict],
                                tok: AutoTokenizer) -> str:
     """
-    For each word in GT, take the majority-vote token in that frame window,
-    then decode the full original word string.
-    Better than CTC collapse for WER evaluation.
+    For each word window, decode the majority-vote predicted token.
+    Uses the tokenizer directly — no oracle GT words.
     """
-    out_words = []
+    out_parts = []
     for w in words:
         f0 = int(w["start"] * FPS)
         f1 = min(int(w["end"] * FPS), len(pred_ids))
         if f0 >= f1:
             continue
-        window = pred_ids[f0:f1]
-        best   = majority_token(window)
+        best = majority_token(pred_ids[f0:f1])
         if best != SIL_ID:
-            out_words.append(w["word"])    # use GT word string if model predicted anything
-    return " ".join(out_words)
+            predicted = tok.decode([best], skip_special_tokens=True).strip()
+            if predicted:
+                out_parts.append(predicted)
+    return " ".join(out_parts)
 
 
 def ctc_decode(pred_ids: list[int], tok: AutoTokenizer) -> str:
@@ -61,11 +61,6 @@ def ctc_decode(pred_ids: list[int], tok: AutoTokenizer) -> str:
 
 def decode_frame_to_text(pred_ids: list[int], words: list[dict],
                           tok: AutoTokenizer) -> tuple[str, str]:
-    """
-    Returns (pred_text, gt_text) decoded using word boundaries.
-    pred_text: words where model's majority prediction in the window is non-SIL
-    gt_text:   original transcript (for WER reference)
-    """
     gt_text   = " ".join(w["word"] for w in words)
     pred_text = decode_by_word_boundaries(pred_ids, words, tok)
     return pred_text, gt_text
