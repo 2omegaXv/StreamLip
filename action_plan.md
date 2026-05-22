@@ -87,9 +87,8 @@
   - Chunk 内 (1+Δ=6帧) 双向 attention，chunk 间因果
   - 输出: 每帧 1024维 → 投影到 backbone 维度
 - [ ] **Causal AR Backbone**
-  - Decoder-only Transformer (选择一):
-    - 方案 A: 从 SmolLM2-360M 初始化，LoRA rank=16 微调
-    - 方案 B: 从头训练小 Transformer (6-8层, 512维, 8头)
+  - Decoder-only Transformer: Gemma-3-1B，LoRA rank=16 微调
+avhubert    - 备选（待速度实验对比）：Qwen3-1.7B、SmolLM2-1.7B、Qwen3-0.6B
   - 输入: 交错的 [visual_feat, text_embedding] 序列
   - 因果 mask (只看过去 + 当前 chunk 的前瞻)
 - [ ] **Text Head**
@@ -115,7 +114,7 @@ lookahead_frames = 5  # 200ms
   - 目标: WER ≤ 50% on LRS3 test (比全局 VSR 19% 差是预期的)
   - 对比:
     - 无前瞻 (Δ=0) vs 有前瞻 (Δ=5)
-    - 有/无 LM 初始化 (SmolLM2 vs random init)
+    - 有/无 LM 初始化 (Gemma-3-1B LoRA vs random init)
 - [ ] **文本质量分析**
   - 逐句 WER 分布，识别失败模式
   - 同形音错误 (buy/by, there/their) 是否被 LM 先验解决

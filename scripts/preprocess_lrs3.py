@@ -203,22 +203,47 @@ def main():
         clips = clips[:args.limit]
     print(f"共 {len(clips)} 个 clip")
 
-    # 2. 构建 worker 参数
+    # 2. 构建 worker 参数，跳过已完成的 clip（从本地目录判断，不用 NAS stat）
+    done = set()
+    split_dir = out_root / args.split
+    if split_dir.exists():
+        for spk in split_dir.iterdir():
+            if not spk.is_dir():
+                continue
+            for clip in spk.iterdir():
+                if (clip / "lip.npy").exists():
+                    done.add((spk.name, clip.name))  # (speaker_id, clip_stem)
+
     worker_args = []
     for mp4, txt in clips:
         parts   = mp4.relative_to(lrs3_root / args.split / args.split).parts
         out_dir = out_root / args.split / parts[0] / mp4.stem
+        if (parts[0], mp4.stem) in done:
+            continue
         worker_args.append((str(mp4), str(txt), str(out_dir)))
 
-    # 3. 并行视频处理
-    with tempfile.TemporaryDirectory() as tmpdir:
-        results = parallel_video_processing(worker_args, args.workers, tmpdir, fa_device)
+    print(f"已完成: {len(done)}  待处理: {len(worker_args)}")
+    if not worker_args:
+        print("全部已完成，跳到 Mimi latent 阶段")
+        clip_dirs = [d for spk in split_dir.iterdir() if spk.is_dir()
+                     for d in spk.iterdir() if (d / "lip.npy").exists()]
+    else:
+        # 并行视频处理
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results = parallel_video_processing(worker_args, args.workers, tmpdir, fa_device)
 
-    ok    = sum(1 for r in results if r.get("ok") and not r.get("skipped"))
-    skip  = sum(1 for r in results if r.get("skipped"))
-    err   = sum(1 for r in results if not r.get("ok"))
-    clip_dirs = [Path(r["path"]) for r in results if r.get("ok")]
-    print(f"视频完成: ok={ok}, skip={skip}, err={err}")
+        ok    = sum(1 for r in results if r.get("ok") and not r.get("skipped"))
+        skip  = sum(1 for r in results if r.get("skipped"))
+        err   = sum(1 for r in results if not r.get("ok"))
+        clip_dirs = [Path(r["path"]) for r in results if r.get("ok")]
+        # 加上之前已完成的 clip
+        for spk in split_dir.iterdir():
+            if not spk.is_dir():
+                continue
+            for d in spk.iterdir():
+                if (d / "lip.npy").exists() and d not in clip_dirs:
+                    clip_dirs.append(d)
+        print(f"视频完成: ok={ok}, skip={skip}, err={err}")
 
     # 4. Mimi latent
     print(f"\n提取 Mimi latent（{device}）...")

@@ -1,4 +1,5 @@
 .claude/
+.venv/
 *.log
 *.out
 *.aux
@@ -9,3 +10,5 @@ data/lrs3
 data/processed/
 pretrained/
 __pycache__
+runs/
+wandb/

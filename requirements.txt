@@ -17,8 +17,14 @@ peft>=0.14.0                # LoRA for SmolLM2
 accelerate>=1.2.0           # mixed precision, device placement
 huggingface-hub>=0.26.0
 
-# ── Visual encoder ────────────────────────────────────────────────────────────
-fairseq                     # AV-HuBERT checkpoint loading (fairseq format)
+# ── AV-HuBERT (visual encoder) ───────────────────────────────────────────────
+# Clone repo to third_party/av_hubert:
+#   git clone --depth 1 https://github.com/facebookresearch/av_hubert.git third_party/av_hubert
+# Then install its deps:
+#   .venv/bin/pip install -r third_party/av_hubert/requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
+# The repo is added to sys.path at runtime by src/streaminlip/av_hubert.py (no pip install needed)
+# Patch applied: third_party/av_hubert/avhubert/hubert_pretraining.py
+#   added `input_modality` field to AVHubertPretrainingConfig for checkpoint compat
 
 # ── Audio / Video ─────────────────────────────────────────────────────────────
 av                          # PyAV: decode .mp4 from LRS3
