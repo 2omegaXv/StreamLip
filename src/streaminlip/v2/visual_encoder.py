@@ -106,19 +106,28 @@ class VisualEncoderV2(nn.Module):
         → AV-HuBERT (frozen, stem trainable) → (B, T, 768)
         → ConformerAdapter (trainable)        → vis_feat (B, T, 960)
         → Visual Head (trainable)             → s_vis (B, T, 49152)
+
+    Visual head is a 2-layer MLP (960 → 960*4 → 49152) with GELU.
+    A single linear layer can only learn linearly separable mappings,
+    which is insufficient for the many-to-one visual→token relationship.
     """
 
     def __init__(
         self,
         avhubert_ckpt: str,
-        n_conformer_layers: int = 4,
+        n_conformer_layers: int = 6,
         chunk_size: int = CHUNK_SIZE,
     ):
         super().__init__()
         self.chunk_size  = chunk_size
         self.av_hubert   = AVHuBERTExtractor(avhubert_ckpt, device="cpu")
         self.conformer   = ConformerAdapter(n_conformer_layers, chunk_size)
-        self.visual_head = nn.Linear(BACKBONE_DIM, VOCAB_SIZE, bias=False)
+        proj = nn.Linear(BACKBONE_DIM * 4, VOCAB_SIZE, bias=False)
+        self.visual_head = nn.Sequential(
+            nn.Linear(BACKBONE_DIM, BACKBONE_DIM * 4),
+            nn.GELU(),
+            proj,
+        )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -132,6 +141,11 @@ class VisualEncoderV2(nn.Module):
             feats = self.av_hubert(x)
         else:
             feats = x
-        vis_feat = self.conformer(feats)      # (B, T, 960)
-        s_vis    = self.visual_head(vis_feat) # (B, T, 49152)
+        vis_feat = self.conformer(feats)                              # (B, T, 960)
+        s_vis    = self.visual_head(vis_feat)                         # (B, T, 49152)
+        # Soft RMS normalization: divides by max(rms, 1.0).
+        # Clamp=1.0 (not 1e-6): when s_vis is near-zero (zero-init), gradient multiplier = 1, no NaN.
+        # When s_vis grows large (rms >> 1), logits are normalized down toward unit-RMS.
+        rms   = s_vis.pow(2).mean(dim=-1, keepdim=True).sqrt().clamp(min=1.0)
+        s_vis = s_vis / rms
         return vis_feat, s_vis

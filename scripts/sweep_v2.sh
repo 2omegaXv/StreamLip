@@ -5,11 +5,10 @@
 cd "$(dirname "$0")/.."
 source .venv/bin/activate
 
-EPOCHS=25
-lr=3e-2
-alpha=1.0
+EPOCHS=30
+lr=1e-3
 
-run_name="v2_subword_lr${lr}_alpha${alpha}_ep${EPOCHS}"
+run_name="v2_lower_lr${lr}_ep${EPOCHS}"
 out_dir="runs/v2/${run_name}"
 
 steps_per_epoch=$(python -c "
@@ -26,15 +25,14 @@ if [ -f "${final_ckpt}" ]; then
 fi
 
 echo "=========================================="
-echo "START: lr=${lr}  alpha=${alpha}  epochs=${EPOCHS}  run=${run_name}"
+echo "START: lr=${lr}  epochs=${EPOCHS}  run=${run_name}"
 echo "=========================================="
 
 python scripts/train_v2.py \
   --lr          "${lr}" \
-  --alpha       "${alpha}" \
   --max_epochs  "${EPOCHS}" \
   --run_name    "${run_name}" \
   --output_dir  "${out_dir}" \
-  --num_workers 12 \
+  --num_workers 8 \
 && echo "DONE: ${run_name}" \
 || echo "FAILED: ${run_name}"

@@ -1,17 +1,29 @@
 """
 LRS3 Dataset V2 for StreamLipV2.
 
-Per-item output (DATA_DESIGN.md §5):
-  lip:          (T, 3, 96, 96)  float32, ImageNet normalized
+Per-item output:
+  visual:       (T, 768) pre-extracted AV-HuBERT features, or (T, 3, 96, 96) raw lip frames
   face:         (3, 256, 256)   float32, ImageNet normalized  (zeros if load_face=False)
-  text_ids:     (T,)            int64,  BOS + frame_labels[:-1]  (teacher forcing input)
-  frame_labels: (T,)            int64,  per-frame token labels from word timestamps
+  clean_ids:    (L,)            int64,  [BOS, tok1, tok2, ...] collapsed SIL-free token seq
+  lm_idx_text:  (T,)            int64,  per-frame index into clean_ids for text CE loss
+                                        points to the LM output BEFORE current token is committed
+  lm_idx_fm:    (T,)            int64,  per-frame index into clean_ids for FM conditioning
+                                        points to the LM output AFTER current token is committed
+  frame_labels: (T,)            int64,  per-frame token labels (CE targets)
   mask:         (T,)            bool,   True = valid frame
   latent:       (T_a, 512)      float16 (empty tensor if load_latent=False)
 
+LM index semantics:
+  The LM runs once on clean_ids (L << T) in teacher-forcing mode → h_lm/s_lm (B, L, ...).
+  Each frame gathers two positions:
+    lm_idx_text[t]: s_lm[lm_idx_text[t]] predicts frame_labels[t]  (text head CE loss)
+    lm_idx_fm[t]:   h_lm[lm_idx_fm[t]]  conditions FM on committed word  (FM head)
+  SIL frames: both indices hold at the last committed position.
+  Non-SIL frames: lm_idx_fm[t] = lm_idx_text[t] + 1.
+
 Frame label generation (pretrain has word timestamps; others are all-SIL):
   SIL = <empty_output> = token 16
-  for each word w: frames [w.start*25 : w.end*25] get the first subword token of that word
+  Each word's BPE tokens are distributed across its frame span proportionally by char count.
 """
 import csv
 import json
@@ -79,17 +91,20 @@ class LRS3DatasetV2(Dataset):
 
     def _frame_labels(self, words: list, T: int, start: int = 0) -> np.ndarray:
         """
-        Assign all BPE tokens of each word to frames using word timestamps,
-        weighted by character count (proportional to phonetic duration).
+        Assign BPE tokens to frames proportionally by character count.
         e.g. MARRIAGE → [▁MAR(37%), RIAGE(63%)] distributed across the word's frames.
         """
         labels = np.full(T, SIL_ID, dtype=np.int64)
         for w in words:
-            toks = self.tokenizer.encode(w["word"], add_special_tokens=False)
+            # Space prefix + lowercase: SmolLM2 is SentencePiece-based; words in
+            # running text carry a leading ▁ (space). Encoding without it fragments
+            # words that are single tokens in context ('gay'→['g','ay'] vs ' gay'→[' gay']).
+            # LRS3 stores all-caps, which also causes fragmentation without lowercase.
+            toks = self.tokenizer.encode(' ' + w["word"].lower(), add_special_tokens=False)
             if not toks:
                 continue
-            dur        = w["end"] - w["start"]
-            tok_strs   = [self.tokenizer.decode([t]).strip() for t in toks]
+            dur         = w["end"] - w["start"]
+            tok_strs    = [self.tokenizer.decode([t]).strip() for t in toks]
             char_counts = [max(len(s), 1) for s in tok_strs]
             total_chars = sum(char_counts)
             cumulative  = 0
@@ -102,6 +117,47 @@ class LRS3DatasetV2(Dataset):
                     labels[f0:f1] = tok_id
                 cumulative += n_chars
         return labels
+
+    def _compute_lm_indices(
+        self, frame_labels: np.ndarray, T: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Build the clean token sequence and per-frame LM gather indices.
+
+        Returns:
+          clean_ids   (L,)  [BOS, tok1, tok2, ...] — SIL-free, no repeats
+          lm_idx_text (T,)  per-frame index for text CE: points to position BEFORE commit
+          lm_idx_fm   (T,)  per-frame index for FM cond:  points to position AFTER commit
+                            for non-SIL frames: lm_idx_fm = lm_idx_text + 1
+                            for SIL frames:     both hold at last committed position
+        """
+        clean_ids    = [self.bos_id]
+        lm_idx_text  = np.zeros(T, dtype=np.int64)
+        lm_idx_fm    = np.zeros(T, dtype=np.int64)
+
+        t = 0
+        while t < T:
+            tok = int(frame_labels[t])
+            # find the end of this run
+            end = t + 1
+            while end < T and frame_labels[end] == tok:
+                end += 1
+
+            if tok == SIL_ID:
+                # SIL: both indices stay at last committed position
+                last = len(clean_ids) - 1
+                lm_idx_text[t:end] = last
+                lm_idx_fm[t:end]   = last
+            else:
+                pos_before = len(clean_ids) - 1   # LM output before this token
+                pos_after  = len(clean_ids)        # LM output after this token
+                clean_ids.append(tok)
+                lm_idx_text[t:end] = pos_before
+                lm_idx_fm[t:end]   = pos_after
+
+            t = end
+
+        return np.array(clean_ids, dtype=np.int64), lm_idx_text, lm_idx_fm
 
     def __getitem__(self, idx: int) -> dict:
         clip_dir = self.clips[idx]
@@ -149,10 +205,10 @@ class LRS3DatasetV2(Dataset):
         else:
             face = torch.zeros(3, 256, 256, dtype=torch.float32)
 
-        # ── frame labels & teacher-forcing ids ───────────────────────────────
+        # ── frame labels & LM indices ─────────────────────────────────────────
         meta     = json.loads((clip_dir / "text.json").read_text())
-        labels   = self._frame_labels(meta.get("words", []), T, start=start)  # (T,)
-        text_ids = np.concatenate([[self.bos_id], labels[:-1]])               # (T,)
+        labels   = self._frame_labels(meta.get("words", []), T, start=start)
+        clean_ids, lm_idx_text, lm_idx_fm = self._compute_lm_indices(labels, T)
 
         # ── latent (Phase 2) ──────────────────────────────────────────────────
         if self.load_latent:
@@ -166,8 +222,10 @@ class LRS3DatasetV2(Dataset):
         return {
             "visual":       visual[:T],
             "face":         face,
-            "text_ids":     torch.from_numpy(text_ids),     # (T,)
-            "frame_labels": torch.from_numpy(labels),       # (T,)
+            "clean_ids":    torch.from_numpy(clean_ids),       # (L,)
+            "lm_idx_text":  torch.from_numpy(lm_idx_text),    # (T,)
+            "lm_idx_fm":    torch.from_numpy(lm_idx_fm),      # (T,)
+            "frame_labels": torch.from_numpy(labels),         # (T,)
             "mask":         torch.ones(T, dtype=torch.bool),
             "latent":       latent,
         }
@@ -176,12 +234,17 @@ class LRS3DatasetV2(Dataset):
 def collate_fn(batch: list[dict]) -> dict:
     max_T  = max(b["visual"].shape[0] for b in batch)
     max_Ta = max(b["latent"].shape[0] for b in batch)
+    max_L  = max(b["clean_ids"].shape[0] for b in batch)
     B      = len(batch)
     vis_shape = batch[0]["visual"].shape[1:]
 
     visual       = torch.zeros(B, max_T, *vis_shape)
     face         = torch.stack([b["face"] for b in batch])
-    text_ids     = torch.full((B, max_T), SIL_ID, dtype=torch.long)
+    # clean_ids padded with SIL; the LM attention mask covers only valid positions
+    clean_ids    = torch.full((B, max_L), SIL_ID, dtype=torch.long)
+    clean_mask   = torch.zeros(B, max_L, dtype=torch.long)
+    lm_idx_text  = torch.zeros(B, max_T, dtype=torch.long)
+    lm_idx_fm    = torch.zeros(B, max_T, dtype=torch.long)
     frame_labels = torch.full((B, max_T), SIL_ID, dtype=torch.long)
     mask         = torch.zeros(B, max_T, dtype=torch.bool)
     latent       = (torch.zeros(B, max_Ta, 512, dtype=torch.float16)
@@ -189,15 +252,21 @@ def collate_fn(batch: list[dict]) -> dict:
 
     for i, b in enumerate(batch):
         T  = b["visual"].shape[0]
+        L  = b["clean_ids"].shape[0]
         Ta = b["latent"].shape[0]
-        visual[i, :T]       = b["visual"]
-        text_ids[i, :T]     = b["text_ids"]
-        frame_labels[i, :T] = b["frame_labels"]
-        mask[i, :T]         = b["mask"]
+        visual[i, :T]        = b["visual"]
+        clean_ids[i, :L]     = b["clean_ids"]
+        clean_mask[i, :L]    = 1
+        lm_idx_text[i, :T]   = b["lm_idx_text"]
+        lm_idx_fm[i, :T]     = b["lm_idx_fm"]
+        frame_labels[i, :T]  = b["frame_labels"]
+        mask[i, :T]          = b["mask"]
         if latent is not None and Ta > 0:
-            latent[i, :Ta]  = b["latent"]
+            latent[i, :Ta]   = b["latent"]
 
     return {
-        "visual": visual, "face": face, "text_ids": text_ids,
+        "visual": visual, "face": face,
+        "clean_ids": clean_ids, "clean_mask": clean_mask,
+        "lm_idx_text": lm_idx_text, "lm_idx_fm": lm_idx_fm,
         "frame_labels": frame_labels, "mask": mask, "latent": latent,
     }

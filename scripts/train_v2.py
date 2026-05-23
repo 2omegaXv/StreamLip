@@ -43,12 +43,12 @@ def parse_args():
     p.add_argument("--resnet50_weights", default="pretrained/resnet50-11ad3fa6.pth")
     p.add_argument("--output_dir",       default="runs/v2/phase1")
     p.add_argument("--run_name",         default="streamlip_v2_phase1")
-    p.add_argument("--batch_size",       type=int,   default=256)
+    p.add_argument("--batch_size",       type=int,   default=512)
     p.add_argument("--grad_accum",       type=int,   default=1)    # effective bs=32
     p.add_argument("--lr",               type=float, default=1e-3)
     p.add_argument("--warmup_steps",     type=int,   default=None,
                    help="warmup steps; overrides --warmup_epochs if set")
-    p.add_argument("--warmup_epochs",    type=float, default=3,
+    p.add_argument("--warmup_epochs",    type=float, default=3.0,
                    help="warmup duration in epochs (converted to steps after dataset load)")
     p.add_argument("--max_steps",        type=int,   default=None,
                    help="total optimizer steps; overrides --max_epochs if set")
@@ -57,9 +57,13 @@ def parse_args():
     p.add_argument("--max_frames",       type=int,   default=150)
     p.add_argument("--lora_rank",        type=int,   default=16)
     p.add_argument("--alpha",            type=float, default=1.0,
-                   help="PoE LM weight: posterior = s_vis + alpha * s_lm")
+                   help="PoE LM weight: posterior = log_softmax(s_vis) + alpha * log_softmax(s_lm)")
+    p.add_argument("--lambda_text",      type=float, default=1.0,
+                   help="text loss weight; use 1.0 for phase1, 0.005 for phase2 (FM dominates)")
+    p.add_argument("--lambda_sil",       type=float, default=0.3,
+                   help="SIL binary detection loss weight")
     p.add_argument("--eval_every",       type=int,   default=500)
-    p.add_argument("--save_every",       type=int,   default=2000)
+    p.add_argument("--save_every",       type=int,   default=1000)
     p.add_argument("--num_workers",      type=int,   default=8)
     p.add_argument("--val_clips",        type=int,   default=500)
     p.add_argument("--no_wandb",         action="store_true")
@@ -80,35 +84,50 @@ def get_lr(step: int, args) -> float:
 
 @torch.no_grad()
 def evaluate(model: StreamLipV2, loader: DataLoader, device: str,
-             max_batches: int = 20) -> tuple[float, float, float]:
+             max_batches: int = 20) -> tuple[float, float, float, float]:
     model.eval()
-    total_loss, total_correct, total_valid = 0.0, 0, 0
+    total_loss_text, total_loss_sil = 0.0, 0.0
     total_correct_nonsil, total_valid_nonsil = 0, 0
+    total_sil_correct, total_sil_valid = 0, 0
+    i = -1
     for i, batch in enumerate(loader):
         if i >= max_batches:
             break
-        lip          = batch["visual"].to(device, dtype=torch.bfloat16)
-        text_ids     = batch["text_ids"].to(device)
+        visual       = batch["visual"].to(device, dtype=torch.bfloat16)
+        clean_ids    = batch["clean_ids"].to(device)
+        clean_mask   = batch["clean_mask"].to(device)
+        lm_idx_text  = batch["lm_idx_text"].to(device)
+        lm_idx_fm    = batch["lm_idx_fm"].to(device)
         frame_labels = batch["frame_labels"].to(device)
         mask         = batch["mask"].to(device)
         face         = batch["face"].to(device, dtype=torch.bfloat16)
 
-        out = model(lip=lip, text_ids=text_ids, face=face,
-                    frame_labels=frame_labels, mask=mask, latent=None)
+        out = model(
+            visual=visual, clean_ids=clean_ids, clean_mask=clean_mask,
+            lm_idx_text=lm_idx_text, lm_idx_fm=lm_idx_fm,
+            face=face, frame_labels=frame_labels, mask=mask, latent=None,
+        )
 
-        total_loss    += out["loss_text"].item()
-        preds          = out["posterior"].argmax(-1)     # (B, T)
-        total_correct += (preds[mask] == frame_labels[mask]).sum().item()
-        total_valid   += mask.sum().item()
+        total_loss_text += out["loss_text"].item()
+        total_loss_sil  += out["loss_sil"].item()
 
+        preds   = out["posterior"].argmax(-1)
         non_sil = mask & (frame_labels != 16)
         total_correct_nonsil += (preds[non_sil] == frame_labels[non_sil]).sum().item()
         total_valid_nonsil   += non_sil.sum().item()
 
-    loss     = total_loss / max(i + 1, 1)
-    acc      = total_correct / max(total_valid, 1)
-    acc_word = total_correct_nonsil / max(total_valid_nonsil, 1)
-    return loss, acc, acc_word
+        sil_target = (frame_labels == 16)
+        sil_pred   = out["sil_logit"] > 0
+        total_sil_correct += (sil_pred[mask] == sil_target[mask]).sum().item()
+        total_sil_valid   += mask.sum().item()
+
+    n = max(i + 1, 1)
+    return (
+        total_loss_text / n,
+        total_correct_nonsil / max(total_valid_nonsil, 1),
+        total_loss_sil / n,
+        total_sil_correct / max(total_sil_valid, 1),
+    )
 
 
 # ── checkpoint ────────────────────────────────────────────────────────────────
@@ -117,7 +136,9 @@ def save_checkpoint(model: StreamLipV2, out_dir: Path, step: int):
     path = out_dir / f"step_{step:06d}.pt"
     torch.save({
         "step":            step,
+        "alpha":           model.alpha.data,
         "visual_encoder":  model.visual_encoder.state_dict(),
+        "sil_head":        model.sil_head.state_dict(),
         "lm":              model.lm.state_dict(),
     }, str(path))
     print(f"  [save] {path}", flush=True)
@@ -179,8 +200,13 @@ def main():
         persistent_workers=args.num_workers > 0,
         multiprocessing_context="fork" if args.num_workers > 0 else None,
     )
-    train_loader = DataLoader(train_ds, shuffle=True,  **loader_kw)
-    val_loader   = DataLoader(val_ds,   shuffle=False, **loader_kw)
+    train_loader = DataLoader(train_ds, shuffle=True, **loader_kw)
+    val_loader   = DataLoader(val_ds, shuffle=False,
+                              batch_size=args.batch_size,
+                              num_workers=min(args.num_workers, 4),
+                              collate_fn=collate_fn,
+                              pin_memory=True,
+                              drop_last=False)
 
     # ── model ─────────────────────────────────────────────────────────────────
     print("Building StreamLipV2...")
@@ -189,6 +215,8 @@ def main():
         smollm2_path=args.smollm2_path,
         lora_rank=args.lora_rank,
         alpha=args.alpha,
+        lambda_text=args.lambda_text,
+        lambda_sil=args.lambda_sil,
         resnet50_weights=args.resnet50_weights,
     )
     model.phase1_mode()          # freeze FM head + speaker encoder
@@ -215,16 +243,20 @@ def main():
     for _ in range(100_000):          # epoch loop
         for batch in train_loader:
 
-            lip          = batch["visual"].to(device, dtype=torch.bfloat16)
-            text_ids     = batch["text_ids"].to(device)
+            visual       = batch["visual"].to(device, dtype=torch.bfloat16)
+            clean_ids    = batch["clean_ids"].to(device)
+            clean_mask   = batch["clean_mask"].to(device)
+            lm_idx_text  = batch["lm_idx_text"].to(device)
+            lm_idx_fm    = batch["lm_idx_fm"].to(device)
             frame_labels = batch["frame_labels"].to(device)
             mask         = batch["mask"].to(device)
             face         = batch["face"].to(device, dtype=torch.bfloat16)
 
             with torch.amp.autocast("cuda", dtype=torch.bfloat16):
                 out = model(
-                    lip=lip, text_ids=text_ids, face=face,
-                    frame_labels=frame_labels, mask=mask, latent=None,
+                    visual=visual, clean_ids=clean_ids, clean_mask=clean_mask,
+                    lm_idx_text=lm_idx_text, lm_idx_fm=lm_idx_fm,
+                    face=face, frame_labels=frame_labels, mask=mask, latent=None,
                 )
 
             (out["loss"] / args.grad_accum).backward()
@@ -244,6 +276,7 @@ def main():
             if step % 10 == 0:
                 loss_val  = out["loss"].item()
                 loss_text = out["loss_text"].item()
+                loss_sil  = out["loss_sil"].item()
                 now       = time.time()
                 sps       = (now - t_log) / 10
                 t_log     = now
@@ -251,7 +284,7 @@ def main():
                 eta = f"{rem/3600:.1f}h" if rem > 3600 else f"{rem/60:.0f}m"
                 print(
                     f"step {step:6d}/{args.max_steps} | "
-                    f"loss {loss_val:.4f} | text {loss_text:.4f} | "
+                    f"loss {loss_val:.4f} | text {loss_text:.4f} | sil {loss_sil:.4f} | "
                     f"lr {get_lr(step, args):.2e} | {sps:.2f}s/step | eta {eta}",
                     flush=True,
                 )
@@ -259,17 +292,24 @@ def main():
                     wandb.log({
                         "train/loss":      loss_val,
                         "train/loss_text": loss_text,
+                        "train/loss_sil":  loss_sil,
                         "train/lr":        get_lr(step, args),
                         "perf/sps":        sps,
                     }, step=step)
 
             # ── eval ──────────────────────────────────────────────────────────
             if step % args.eval_every == 0:
-                val_loss, val_acc, val_acc_word = evaluate(model, val_loader, device)
-                print(f"  [val] loss {val_loss:.4f} | acc {val_acc:.4f} | word_acc {val_acc_word:.4f}", flush=True)
+                val_loss_text, val_acc_word, val_loss_sil, val_acc_sil = evaluate(model, val_loader, device)
+                print(
+                    f"  [val] loss_text {val_loss_text:.4f} | word_acc {val_acc_word:.4f} | "
+                    f"loss_sil {val_loss_sil:.4f} | sil_acc {val_acc_sil:.4f}",
+                    flush=True,
+                )
                 if use_wandb:
-                    wandb.log({"val/loss": val_loss, "val/acc": val_acc,
-                               "val/word_acc": val_acc_word}, step=step)
+                    wandb.log({
+                        "val/loss_text": val_loss_text, "val/word_acc": val_acc_word,
+                        "val/loss_sil":  val_loss_sil,  "val/sil_acc":  val_acc_sil,
+                    }, step=step)
                 model.train()
 
             # ── checkpoint ────────────────────────────────────────────────────
