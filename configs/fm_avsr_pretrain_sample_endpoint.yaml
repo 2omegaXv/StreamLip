@@ -14,8 +14,8 @@ n_dit_layers: 6
 use_cross_attn: false
 
 lr: 0.0003
-warmup_epochs: 3.0
-max_epochs: 30
+warmup_epochs: 1.0
+max_epochs: 15
 eval_every: 500
 save_every: 1000
 
