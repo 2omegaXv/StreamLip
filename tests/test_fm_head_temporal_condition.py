@@ -72,6 +72,24 @@ class FMHeadTemporalConditionTest(unittest.TestCase):
             "DiT cross-attention ignored condition token order",
         )
 
+    def test_sample_can_backpropagate_for_sample_recon_loss(self):
+        torch.manual_seed(3)
+        model = FMHead(n_layers=1).train()
+        vis = torch.randn(1, 4, 960)
+        h_lm = torch.randn(1, 4, 960)
+        spk = torch.randn(1, 256)
+
+        pred = model.sample(vis, h_lm, spk, nfe=2)
+        loss = pred.float().pow(2).mean()
+        loss.backward()
+
+        self.assertIsNotNone(model.final_proj.weight.grad)
+        self.assertGreater(
+            model.final_proj.weight.grad.abs().sum().item(),
+            0.0,
+            "sample reconstruction loss cannot backpropagate through inference",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

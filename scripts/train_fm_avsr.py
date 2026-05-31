@@ -260,7 +260,7 @@ def main():
                     else:
                         loss_recon = loss_fm.new_zeros(())
                     if args.lambda_sample_recon > 0:
-                        pred_sample = fm.forward_inference(
+                        pred_sample = fm.sample(
                             v_down, h_down, spk, nfe=args.sample_recon_nfe
                         )
                         loss_sample_recon = torch.nn.functional.mse_loss(

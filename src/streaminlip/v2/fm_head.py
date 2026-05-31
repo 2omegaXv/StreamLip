@@ -249,15 +249,14 @@ class FMHead(nn.Module):
         t = torch.ones(cond.shape[0], device=cond.device, dtype=cond.dtype)
         return self._forward_dit(x, cond, t)
 
-    @torch.no_grad()
-    def forward_inference(
+    def sample(
         self,
         vis_down: torch.Tensor,   # (B, T_a, 960)
         h_down:   torch.Tensor,   # (B, T_a, 960)
         id_vec:   torch.Tensor,   # (B, 256)
         nfe:      int = 10,
     ) -> torch.Tensor:
-        """Euler solver. Returns predicted Mimi latent (B, T_a, 512)."""
+        """Euler solver. Keeps gradients so endpoint losses can train sampling."""
         cond = self._build_cond(vis_down, h_down, id_vec)
         B, T_a, _ = cond.shape
 
@@ -267,3 +266,14 @@ class FMHead(nn.Module):
             t = torch.full((B,), step / nfe, device=cond.device, dtype=cond.dtype)
             x = x + dt * self._forward_dit(x, cond, t)
         return x
+
+    @torch.no_grad()
+    def forward_inference(
+        self,
+        vis_down: torch.Tensor,   # (B, T_a, 960)
+        h_down:   torch.Tensor,   # (B, T_a, 960)
+        id_vec:   torch.Tensor,   # (B, 256)
+        nfe:      int = 10,
+    ) -> torch.Tensor:
+        """No-grad Euler solver for evaluation/inference."""
+        return self.sample(vis_down, h_down, id_vec, nfe=nfe)
