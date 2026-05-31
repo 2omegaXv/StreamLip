@@ -1,6 +1,6 @@
 # StreamLip 当前代码架构说明
 
-更新时间：2026-05-30
+更新时间：2026-05-31
 
 本文档描述当前 worktree 中的最新实际代码状态。重点结论是：当前最新主线已经不是一个在线端到端的 `video -> text -> audio` 系统，而是一个以预提取 Auto-AVSR 与 SmolLM2 特征为条件的独立 FM 声码器头训练路线。
 
@@ -464,13 +464,145 @@ src/streaminlip/fm_avsr_model.py
 
 优先级从高到低：
 
-1. 修复 `v_down = enc[:, ::2, :]`，改为按 `T_v -> T_a` 重采样。
-2. 同步修复 `eval_fm_avsr.py` 的视觉重采样。
-3. 将 `FMHeadAVSR` 抽到共享模块，避免训练/评估结构漂移。
-4. 把 `train_fm_avsr.py` 默认 `batch_size` 改成 128。
-5. 重跑 `fm_avsr_no_text` 消融。
-6. 用相同样本生成 with-text/no-text 音频，做主观对比。
+1. 围绕真实 FM sampling endpoint 优化，而不是继续只看 deterministic recon。
+2. 用 `lambda_sample_recon > 0` 的配置做小规模/全量验证；这个 loss 现在必须走可微 `FMHead.sample()`。
+3. 评估 `sample_recon_nfe=4/8/10` 与 eval `nfe=4/10/50` 的 mismatch。
+4. 将 `FMHeadAVSR` 抽到共享模块，避免训练/评估结构漂移。
+5. 重跑 fixed-latents full training 的评估，并和单样本 overfit 结果对齐。
+6. 重跑 with-text/no-text 消融。
 7. 决定 `third_party/auto_avsr` 是提交、submodule，还是外部安装依赖。
+
+## 5.1 2026-05-31 关键实验发现
+
+### Mimi latent 数据已经重新固定到 12.5 Hz
+
+之前 GT 音频在 eval 中像 2x speed，根因是大量 `latent.npz` 仍是旧的 25 Hz 表示，而当前 Mimi decode 路径期望 12.5 Hz latent。现在处理逻辑是：
+
+```text
+audio.wav -> Mimi encode/downsample -> latent.npz (T_a, 512), 约 12.5 Hz
+```
+
+`FMAVSRDataset.validate_latent_frame_rate()` 会拒绝疑似 25 Hz latent，避免再用 `lat[::2]` 这种错误修补。全量 latent 已重新提取并重算：
+
+```text
+data/processed/latent_norm_stats.npz
+```
+
+训练读入 latent 后会按维度标准化，eval 前再 denormalize 后送 Mimi decoder。
+
+### cross-attention 不是当前主要瓶颈
+
+`src/streaminlip/v2/fm_head.py` 现在支持可选 `use_cross_attn`。结构是：
+
+```text
+x -> self-attn(x)
+  -> cross-attn(query=x, key/value=condition tokens)
+  -> FFN
+```
+
+condition tokens 会加 sinusoidal position embedding，否则 attention 对 K/V token 顺序本身不敏感。对应实验配置：
+
+```text
+configs/fm_avsr_overfit_12p5hz_crossattn.yaml
+```
+
+单样本 overfit 结果：
+
+```text
+cross-attn FM nfe50:
+  audio corr   0.9466
+  SI-SDR       9.36 dB
+  latent MSE   0.1832
+
+cross-attn deterministic recon:
+  audio corr   0.9982
+  SI-SDR       24.55 dB
+```
+
+解释：cross-attention 证明模型能读取条件并直接重建 latent，但没有解决从随机噪声沿 velocity field 积分到正确 endpoint 的问题。因此 deterministic recon 只能作为诊断，不应作为主要优化目标。
+
+### 之前的 sample recon loss 实际没有梯度
+
+旧训练代码中：
+
+```python
+pred_sample = fm.forward_inference(...)
+loss_sample_recon = mse(pred_sample, lat_gt)
+```
+
+但 `forward_inference()` 带 `@torch.no_grad()`，所以旧的 `lambda_sample_recon` 没有真正通过 Euler sampling path 回传梯度。当前已修复为：
+
+```text
+FMHead.sample(...)             可微 Euler solver，用于训练 endpoint loss
+FMHead.forward_inference(...)  no-grad wrapper，用于 eval/inference
+```
+
+训练脚本现在用：
+
+```python
+pred_sample = fm.sample(v_down, h_down, spk, nfe=args.sample_recon_nfe)
+loss_sample_recon = mse(pred_sample, lat_gt)
+```
+
+对应测试：
+
+```text
+tests/test_fm_head_temporal_condition.py
+  test_sample_can_backpropagate_for_sample_recon_loss
+```
+
+### 当前最有效的单样本方向：sample endpoint loss
+
+对应配置：
+
+```text
+configs/fm_avsr_overfit_12p5hz_sample_endpoint.yaml
+```
+
+设置：
+
+```yaml
+lambda_recon: 0.0
+lambda_sample_recon: 1.0
+sample_recon_nfe: 4
+```
+
+单样本 overfit 5000 step 结果：
+
+```text
+train loss:
+  step 1:    fm 1.9701 | sample 1.9654 | total 3.9354
+  step 1000: fm 0.3484 | sample 0.2442 | total 0.5926
+  step 3000: fm 0.1190 | sample 0.0980 | total 0.2170
+  step 5000: fm 0.1119 | sample 0.0896 | total 0.2015
+
+eval nfe=4:
+  audio corr   0.9726
+  SI-SDR       12.43 dB
+  latent MSE   0.0918
+  latent corr  0.9511
+
+eval nfe=50:
+  audio corr   0.9688
+  SI-SDR       11.84 dB
+  latent MSE   0.0922
+  latent corr  0.9507
+```
+
+对比：
+
+```text
+cross-attn nfe50:
+  corr 0.9466 | SI-SDR 9.36 dB | latent MSE 0.1832
+
+旧 sample_recon nfe50:
+  corr 0.9662 | SI-SDR 11.47 dB
+
+旧 recon_aux nfe50:
+  corr 0.9660 | SI-SDR 11.45 dB
+```
+
+结论：当前最明确的改进不是加强 condition 注入，而是让训练目标直接约束真实 sampling endpoint。后续优先测试 `sample_recon_nfe=8/10`、不同 `lambda_sample_recon`，并在全量训练中验证。
 
 ## 6. 当前推荐命令
 
