@@ -20,7 +20,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torchaudio
+try:
+    import torchaudio
+except OSError:
+    torchaudio = None  # fallback: use scipy in extract_latent
 from tqdm import tqdm
 from transformers import MimiModel
 
@@ -36,8 +39,8 @@ MIMI_SR    = 24000
 
 # ── Mimi latent 提取 ─────────────────────────────────────────────────────────
 
-def build_mimi(device):
-    mimi = MimiModel.from_pretrained(str(MIMI_PATH)).to(device).eval()
+def build_mimi(device, mimi_path):
+    mimi = MimiModel.from_pretrained(str(mimi_path), local_files_only=True).to(device).eval()
     for p in mimi.parameters():
         p.requires_grad_(False)
     return mimi
@@ -45,32 +48,37 @@ def build_mimi(device):
 
 @torch.no_grad()
 def extract_latent(mimi, wav_path, device):
-    wav, sr = torchaudio.load(str(wav_path))
+    from scipy.io import wavfile
+    import scipy.signal
+    sr, wav_np = wavfile.read(str(wav_path))
+    wav_f = wav_np.astype(np.float32) / 32768.0
+    if wav_f.ndim > 1:
+        wav_f = wav_f.mean(axis=1)
     if sr != MIMI_SR:
-        wav = torchaudio.functional.resample(wav, sr, MIMI_SR)
-    if wav.shape[0] > 1:
-        wav = wav.mean(0, keepdim=True)
-    wav = wav.unsqueeze(0).to(device)              # (1, 1, T)
-    x = mimi.encoder(wav)                          # (1, 512, T')
-    x = mimi.encoder_transformer(x.transpose(1,2)).last_hidden_state  # (1, T', 512)
-    x = mimi.downsample(x.transpose(1,2))          # (1, 512, T_a)
-    return x.transpose(1,2).squeeze(0).cpu().half().numpy()  # (T_a, 512)
+        n_out = int(len(wav_f) * MIMI_SR / sr)
+        wav_f = scipy.signal.resample(wav_f, n_out)
+    wav = torch.from_numpy(wav_f).unsqueeze(0).unsqueeze(0).to(device)  # (1,1,T)
+    codes = mimi.encode(wav).audio_codes                             # (1, 32, T_a) int64
+    x_q   = mimi.quantizer.decode(codes)                             # (1, 512, T_a) quantized
+    lat   = x_q.transpose(1,2).squeeze(0).float().cpu()             # (T_a, 512) float32
+    lat   = lat.clamp(-65504, 65504)                                  # safe float16 range
+    return lat.half().numpy()                                         # (T_a, 512) float16
 
 
-def extract_latents_gpu(clip_dirs, device):
-    mimi = build_mimi(device)
+def extract_latents_gpu(clip_dirs, device, mimi_path, force=False, total=None):
+    mimi = build_mimi(device, mimi_path)
     errors = []
-    for d in tqdm(clip_dirs, desc="Mimi latent"):
+    for d in tqdm(clip_dirs, desc="Mimi latent", unit="clip", total=total, dynamic_ncols=True):
         latent_path = d / "latent.npz"
         audio_path  = d / "audio.wav"
-        if latent_path.exists():
+        if latent_path.exists() and not force:
             continue
         if not audio_path.exists():
             errors.append(f"missing audio: {d}")
             continue
         try:
             latent = extract_latent(mimi, audio_path, device)
-            np.savez_compressed(str(latent_path), latent=latent)
+            np.savez(str(latent_path), latent=latent)
         except Exception as e:
             errors.append(f"{d}: {e}")
     return errors
@@ -179,6 +187,42 @@ def collect_clips(lrs3_root, split):
     return clips
 
 
+def iter_processed_clip_dirs_from_manifest(out_root, split, limit=None, num_shards=1, shard_id=0):
+    manifest_path = out_root / "manifest.csv"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"找不到 manifest: {manifest_path}")
+    n = 0
+    seen = 0
+    for row in csv.DictReader(open(manifest_path)):
+        if row["split"] != split:
+            continue
+        if seen % num_shards != shard_id:
+            seen += 1
+            continue
+        yield out_root / row["path"]
+        seen += 1
+        n += 1
+        if limit and n >= limit:
+            break
+
+
+def count_manifest_split(out_root, split, limit=None, num_shards=1, shard_id=0):
+    manifest_path = out_root / "manifest.csv"
+    n = 0
+    seen = 0
+    for row in csv.DictReader(open(manifest_path)):
+        if row["split"] != split:
+            continue
+        if seen % num_shards != shard_id:
+            seen += 1
+            continue
+        n += 1
+        seen += 1
+        if limit and n >= limit:
+            break
+    return n
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--split",    choices=["pretrain","trainval","test"], required=True)
@@ -188,20 +232,57 @@ def main():
                         help="face_alignment 设备，默认与 --gpu 一致，如 cuda:1 或 cpu")
     parser.add_argument("--lrs3_root", default=str(LRS3_ROOT))
     parser.add_argument("--out_root",  default=str(OUT_ROOT))
-    parser.add_argument("--limit",    type=int, default=None)
+    parser.add_argument("--mimi_path", default=str(MIMI_PATH))
+    parser.add_argument("--limit",        type=int, default=None)
+    parser.add_argument("--latent_only", action="store_true",
+                        help="Only re-extract latent.npz from existing processed audio.wav files listed in manifest.csv.")
+    parser.add_argument("--num_shards", type=int, default=1,
+                        help="Split latent_only manifest work into this many disjoint shards.")
+    parser.add_argument("--shard_id", type=int, default=0,
+                        help="Shard index for latent_only, in [0, num_shards).")
+    parser.add_argument("--force_latent", action="store_true",
+                        help="Re-extract latent.npz even if it already exists (use after VQ fix)")
     args = parser.parse_args()
 
     lrs3_root = Path(args.lrs3_root)
     out_root  = Path(args.out_root)
+    mimi_path = Path(args.mimi_path)
     device    = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
     fa_device = args.fa_device or (f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
-    print(f"Split: {args.split}  Workers: {args.workers}  Mimi: {device}  FAN: {fa_device}")
+    if args.num_shards < 1:
+        raise ValueError("--num_shards must be >= 1")
+    if not (0 <= args.shard_id < args.num_shards):
+        raise ValueError("--shard_id must be in [0, num_shards)")
+    print(f"Split: {args.split}  Workers: {args.workers}  Mimi: {device}  FAN: {fa_device}", flush=True)
+
+    if args.latent_only:
+        total = count_manifest_split(
+            out_root, args.split, args.limit, args.num_shards, args.shard_id
+        )
+        clip_dirs = iter_processed_clip_dirs_from_manifest(
+            out_root, args.split, args.limit, args.num_shards, args.shard_id
+        )
+        print(
+            f"latent_only: 从 manifest 流式处理 {total} 个 clip "
+            f"(shard {args.shard_id}/{args.num_shards})",
+            flush=True,
+        )
+        print(f"\n提取 Mimi latent（{device}）...", flush=True)
+        latent_errors = extract_latents_gpu(
+            clip_dirs, device, mimi_path, force=args.force_latent, total=total
+        )
+        if latent_errors:
+            print(f"latent 错误 {len(latent_errors)} 个:")
+            for e in latent_errors[:10]:
+                print(f"  {e}")
+        print("完成。", flush=True)
+        return
 
     # 1. 收集 clip 列表
     clips = collect_clips(lrs3_root, args.split)
     if args.limit:
         clips = clips[:args.limit]
-    print(f"共 {len(clips)} 个 clip")
+    print(f"共 {len(clips)} 个 clip", flush=True)
 
     # 2. 构建 worker 参数，跳过已完成的 clip（从本地目录判断，不用 NAS stat）
     done = set()
@@ -222,9 +303,9 @@ def main():
             continue
         worker_args.append((str(mp4), str(txt), str(out_dir)))
 
-    print(f"已完成: {len(done)}  待处理: {len(worker_args)}")
+    print(f"已完成: {len(done)}  待处理: {len(worker_args)}", flush=True)
     if not worker_args:
-        print("全部已完成，跳到 Mimi latent 阶段")
+        print("全部已完成，跳到 Mimi latent 阶段", flush=True)
         clip_dirs = [d for spk in split_dir.iterdir() if spk.is_dir()
                      for d in spk.iterdir() if (d / "lip.npy").exists()]
     else:
@@ -243,11 +324,11 @@ def main():
             for d in spk.iterdir():
                 if (d / "lip.npy").exists() and d not in clip_dirs:
                     clip_dirs.append(d)
-        print(f"视频完成: ok={ok}, skip={skip}, err={err}")
+        print(f"视频完成: ok={ok}, skip={skip}, err={err}", flush=True)
 
     # 4. Mimi latent
-    print(f"\n提取 Mimi latent（{device}）...")
-    latent_errors = extract_latents_gpu(clip_dirs, device)
+    print(f"\n提取 Mimi latent（{device}）...", flush=True)
+    latent_errors = extract_latents_gpu(clip_dirs, device, mimi_path, force=args.force_latent)
     if latent_errors:
         print(f"latent 错误 {len(latent_errors)} 个:")
         for e in latent_errors[:10]:

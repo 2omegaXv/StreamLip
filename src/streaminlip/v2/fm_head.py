@@ -10,8 +10,8 @@ Condition: c_t = cond_proj( sg(ṽ_t) ∥ sg(h̃_t^LM) ∥ id̂ )
 Training:  OT-CFM straight-line path, x_t = (1-t)*x_0 + t*x_1, target = x_1 - x_0
 Inference: Euler solver, NFE=10
 
-All DiT blocks use adaLN-Zero conditioning on (t_emb + mean_pool(cond)).
-adaLN-Zero is zero-initialized → identity residual at init → stable training.
+Each token receives its aligned per-frame condition and a sinusoidal sequence
+position embedding. DiT block adaLN still uses global time/sample conditioning.
 """
 import math
 import torch
@@ -47,11 +47,24 @@ class SinusoidalTimeEmb(nn.Module):
         return self.mlp(emb.to(t.dtype))
 
 
+def sinusoidal_positions(length: int, dim: int, device, dtype) -> torch.Tensor:
+    """Returns (1, length, dim) sinusoidal sequence position embeddings."""
+    assert dim % 2 == 0
+    half = dim // 2
+    pos = torch.arange(length, device=device, dtype=torch.float32).unsqueeze(1)
+    freqs = torch.exp(
+        -math.log(10000) *
+        torch.arange(half, device=device, dtype=torch.float32) / half
+    ).unsqueeze(0)
+    emb = torch.cat([(pos * freqs).sin(), (pos * freqs).cos()], dim=-1)
+    return emb.to(dtype).unsqueeze(0)
+
+
 class DiTBlock(nn.Module):
     """
     DiT block with adaLN-Zero conditioning.
 
-    cond_vec = t_emb + mean_pool(cond)  — (B, dim) single vector per sample
+    cond_vec = t_emb + mean_pool(cond)  — (B, dim) global modulation vector
     adaLN: scale/shift/gate derived from cond_vec via a zero-initialized linear.
     Attention: bidirectional (no causal mask; FM generation is non-causal).
     """
@@ -124,6 +137,7 @@ class FMHead(nn.Module):
     def __init__(self, n_layers: int = 6, n_heads: int = 8):
         super().__init__()
         self.cond_proj  = nn.Linear(COND_DIM, self.DIM)         # 2176 → 512
+        self.cond_token_proj = nn.Linear(self.DIM, self.DIM)
         self.time_emb   = SinusoidalTimeEmb(self.DIM)
         self.blocks     = nn.ModuleList([DiTBlock(self.DIM, n_heads) for _ in range(n_layers)])
         self.final_norm = nn.LayerNorm(self.DIM)
@@ -152,6 +166,8 @@ class FMHead(nn.Module):
     ) -> torch.Tensor:
         t_emb    = self.time_emb(t)          # (B, 512)
         cond_vec = t_emb + cond.mean(dim=1)  # (B, 512): t_emb + mean_pool(cond)
+        x = x + self.cond_token_proj(cond)
+        x = x + sinusoidal_positions(x.shape[1], x.shape[2], x.device, x.dtype)
         for block in self.blocks:
             x = block(x, cond_vec)
         return self.final_proj(self.final_norm(x))
@@ -161,18 +177,33 @@ class FMHead(nn.Module):
         vis_down: torch.Tensor,   # (B, T_a, 960) — sg already applied by caller
         h_down:   torch.Tensor,   # (B, T_a, 960) — sg already applied by caller
         id_vec:   torch.Tensor,   # (B, 256)
-        x_1:      torch.Tensor,   # (B, T_a, 512) target latent, float32
+        x_1:      torch.Tensor,   # (B, T_a, 512) target latent
     ) -> torch.Tensor:
         """OT-CFM loss: E||v_θ(x_t, c, t) - (x_1 - x_0)||²"""
-        cond = self._build_cond(vis_down, h_down, id_vec)   # (B, T_a, 512)
+        # Unify dtype to match model weights (handles float32/bfloat16 mixed input)
+        dtype = next(self.parameters()).dtype
+        x_1   = x_1.to(dtype)
+        cond  = self._build_cond(vis_down, h_down, id_vec)   # (B, T_a, 512)
 
-        B    = x_1.shape[0]
-        t    = torch.rand(B, device=x_1.device, dtype=x_1.dtype)
-        x_0  = torch.randn_like(x_1)
-        x_t  = (1 - t[:, None, None]) * x_0 + t[:, None, None] * x_1
+        B   = x_1.shape[0]
+        t   = torch.rand(B, device=x_1.device, dtype=dtype)
+        x_0 = torch.randn_like(x_1)
+        x_t = (1 - t[:, None, None]) * x_0 + t[:, None, None] * x_1
 
         pred = self._forward_dit(x_t, cond, t)
-        return F.mse_loss(pred, x_1 - x_0)
+        return F.mse_loss(pred.float(), (x_1 - x_0).float())
+
+    def reconstruct_from_cond(
+        self,
+        vis_down: torch.Tensor,
+        h_down: torch.Tensor,
+        id_vec: torch.Tensor,
+    ) -> torch.Tensor:
+        """Deterministic probe: predict x_1 directly from aligned conditions."""
+        cond = self._build_cond(vis_down, h_down, id_vec)
+        x = torch.zeros_like(cond)
+        t = torch.ones(cond.shape[0], device=cond.device, dtype=cond.dtype)
+        return self._forward_dit(x, cond, t)
 
     @torch.no_grad()
     def forward_inference(
