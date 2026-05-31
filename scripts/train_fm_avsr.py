@@ -16,6 +16,8 @@ Usage:
 import argparse, csv, json, math, os, sys, time
 from pathlib import Path
 
+import numpy as np
+
 _TMPDIR = Path(__file__).parent.parent / ".tmp"
 _TMPDIR.mkdir(exist_ok=True)
 os.environ["TMPDIR"] = str(_TMPDIR)
@@ -83,6 +85,8 @@ def parse_args():
     p.add_argument("--save_every",       type=int,   default=1000)
     p.add_argument("--num_workers",      type=int,   default=8)
     p.add_argument("--val_clips",        type=int,   default=500)
+    p.add_argument("--crop_ta",          type=int,   default=0,
+                   help="Randomly crop each training sample to this many latent frames; 0 disables cropping.")
     p.add_argument("--n_dit_layers",     type=int,   default=6)
     p.add_argument("--use_cross_attn",   action="store_true",
                    help="Insert condition cross-attention in each DiT block.")
@@ -112,6 +116,35 @@ def get_lr(step, warmup, total, lr):
     if step < warmup: return lr * step / max(warmup, 1)
     t = (step - warmup) / max(total - warmup, 1)
     return lr * 0.5 * (1.0 + math.cos(math.pi * t))
+
+
+def crop_batch_to_latent_window(enc_np, latent_np, crop_ta, rng=None):
+    """Crop each sample to a fixed latent window and the aligned 2x video window."""
+    if crop_ta <= 0:
+        return enc_np, latent_np
+    B, max_ta = latent_np.shape[:2]
+    crop_ta = min(crop_ta, max_ta)
+    crop_tv = crop_ta * 2
+    rng = rng or np.random.default_rng()
+
+    enc_crop = np.zeros((B, crop_tv, enc_np.shape[2]), dtype=enc_np.dtype)
+    lat_crop = np.zeros((B, crop_ta, latent_np.shape[2]), dtype=latent_np.dtype)
+    for b in range(B):
+        nonzero = np.any(latent_np[b] != 0, axis=-1)
+        valid_ta = int(nonzero.sum()) if nonzero.any() else max_ta
+        valid_ta = max(1, min(valid_ta, max_ta))
+        if valid_ta > crop_ta:
+            start_ta = int(rng.integers(0, valid_ta - crop_ta + 1))
+            out_ta = crop_ta
+        else:
+            start_ta = 0
+            out_ta = valid_ta
+        start_tv = start_ta * 2
+        out_tv = min(out_ta * 2, max(0, enc_np.shape[1] - start_tv), crop_tv)
+        lat_crop[b, :out_ta] = latent_np[b, start_ta : start_ta + out_ta]
+        if out_tv > 0:
+            enc_crop[b, :out_tv] = enc_np[b, start_tv : start_tv + out_tv]
+    return enc_crop, lat_crop
 
 
 def resample_h_lm(h_lm_np, lens_L, T_a, device):
@@ -227,10 +260,15 @@ def main():
     last_save_total = None
     last_save_lr = None
     fm.train()
+    crop_rng = np.random.default_rng(42)
 
     try:
         for epoch in range(100_000):
             for batch in train_loader:
+                if args.crop_ta > 0:
+                    batch["enc"], batch["latent"] = crop_batch_to_latent_window(
+                        batch["enc"], batch["latent"], args.crop_ta, crop_rng
+                    )
                 enc    = torch.from_numpy(batch["enc"]).to(device, dtype=torch.bfloat16)
                 lat_gt = torch.from_numpy(batch["latent"]).to(device, dtype=torch.float32)
                 spk    = torch.from_numpy(batch["speaker"]).to(device, dtype=torch.bfloat16)

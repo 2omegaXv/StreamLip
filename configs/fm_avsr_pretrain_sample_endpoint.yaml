@@ -8,6 +8,7 @@ clip_list: null
 batch_size: 64
 num_workers: 8
 val_clips: 500
+crop_ta: 160
 
 no_text_cond: false
 n_dit_layers: 6
