@@ -35,13 +35,17 @@ from transformers import MimiModel
 
 class FMHeadAVSR(_FMBase):
     DIM = 512
-    def __init__(self, n_layers=6, n_heads=8):
+    def __init__(self, n_layers=6, n_heads=8, use_cross_attn=False):
         nn.Module.__init__(self)
+        self.use_cross_attn = use_cross_attn
         COND_DIM = 768 + 960 + 256
         self.cond_proj  = nn.Linear(COND_DIM, self.DIM)
         self.cond_token_proj = nn.Linear(self.DIM, self.DIM)
         self.time_emb   = SinusoidalTimeEmb(self.DIM)
-        self.blocks     = nn.ModuleList([DiTBlock(self.DIM, n_heads) for _ in range(n_layers)])
+        self.blocks     = nn.ModuleList([
+            DiTBlock(self.DIM, n_heads, use_cross_attn=use_cross_attn)
+            for _ in range(n_layers)
+        ])
         self.final_norm = nn.LayerNorm(self.DIM)
         self.final_proj = nn.Linear(self.DIM, self.DIM)
 
@@ -79,6 +83,8 @@ def parse_args():
     p.add_argument("--save_gt",       action="store_true")
     p.add_argument("--nfe",           type=int, default=10)
     p.add_argument("--n_dit_layers",  type=int, default=6)
+    p.add_argument("--use_cross_attn", action="store_true",
+                   help="Build FMHeadAVSR with DiT condition cross-attention.")
     p.add_argument("--use_recon",     action="store_true",
                    help="Decode deterministic reconstruct_from_cond output instead of FM sampling.")
     args = p.parse_args()
@@ -87,7 +93,7 @@ def parse_args():
         with open(args.config, "r") as f:
             cfg = yaml.safe_load(f) or {}
         config_keys = {"data_root", "mimi_path", "split", "clip_list",
-                       "no_text_cond", "n_dit_layers"}
+                       "no_text_cond", "n_dit_layers", "use_cross_attn"}
         for k, v in cfg.items():
             if k in config_keys:
                 setattr(args, k, v)
@@ -110,7 +116,10 @@ def main():
 
     # Load FM head
     print("Loading FMHeadAVSR...")
-    fm = FMHeadAVSR(n_layers=args.n_dit_layers).to(device).bfloat16().eval()
+    fm = FMHeadAVSR(
+        n_layers=args.n_dit_layers,
+        use_cross_attn=args.use_cross_attn,
+    ).to(device).bfloat16().eval()
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     fm.load_state_dict(ckpt["fm_head"])
     print(f"  Loaded {args.ckpt}")

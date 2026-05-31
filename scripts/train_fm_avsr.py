@@ -33,13 +33,17 @@ import torch.nn as nn
 # FM head for Auto-AVSR: vis=768, lm=960, speaker=256 → COND_DIM=1984
 class FMHeadAVSR(_FMBase):
     DIM = 512
-    def __init__(self, n_layers=6, n_heads=8):
+    def __init__(self, n_layers=6, n_heads=8, use_cross_attn=False):
         nn.Module.__init__(self)
+        self.use_cross_attn = use_cross_attn
         COND_DIM = 768 + 960 + 256  # avsr_enc + smollm2 h_lm + speaker = 1984
         self.cond_proj  = nn.Linear(COND_DIM, self.DIM)
         self.cond_token_proj = nn.Linear(self.DIM, self.DIM)
         self.time_emb   = SinusoidalTimeEmb(self.DIM)
-        self.blocks     = nn.ModuleList([DiTBlock(self.DIM, n_heads) for _ in range(n_layers)])
+        self.blocks     = nn.ModuleList([
+            DiTBlock(self.DIM, n_heads, use_cross_attn=use_cross_attn)
+            for _ in range(n_layers)
+        ])
         self.final_norm = nn.LayerNorm(self.DIM)
         self.final_proj = nn.Linear(self.DIM, self.DIM)
         nn.init.zeros_(self.final_proj.weight)
@@ -80,6 +84,8 @@ def parse_args():
     p.add_argument("--num_workers",      type=int,   default=8)
     p.add_argument("--val_clips",        type=int,   default=500)
     p.add_argument("--n_dit_layers",     type=int,   default=6)
+    p.add_argument("--use_cross_attn",   action="store_true",
+                   help="Insert condition cross-attention in each DiT block.")
     p.add_argument("--lambda_recon",     type=float, default=0.0,
                    help="Auxiliary deterministic latent reconstruction loss weight.")
     p.add_argument("--lambda_sample_recon", type=float, default=0.0,
@@ -170,7 +176,10 @@ def main():
                    name=args.run_name, config=vars(args))
 
     # ── FM head (trainable) ───────────────────────────────────────────────────
-    fm = FMHeadAVSR(n_layers=args.n_dit_layers).to(device).bfloat16()
+    fm = FMHeadAVSR(
+        n_layers=args.n_dit_layers,
+        use_cross_attn=args.use_cross_attn,
+    ).to(device).bfloat16()
     n_train = sum(p.numel() for p in fm.parameters())
     print(f"FM head: {n_train/1e6:.1f}M params (all trainable)")
 
@@ -179,7 +188,7 @@ def main():
     if args.debug: args.batch_size = min(args.batch_size, 4)
     ds = FMAVSRDataset(args.data_root, args.split, subset="train",
                        limit=limit, clip_list=args.clip_list)
-    val_n   = min(args.val_clips, max(1, len(ds) // 10))
+    val_n   = min(args.val_clips, len(ds))
     train_n = len(ds) - val_n
     if val_n > 0:
         train_ds, val_ds = random_split(ds, [train_n, val_n],

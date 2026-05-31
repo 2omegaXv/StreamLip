@@ -20,13 +20,22 @@ class FMHeadV4(_FMHeadBase):
 
     DIM = LATENT_DIM
 
-    def __init__(self, n_layers: int = 6, n_heads: int = 8):
+    def __init__(
+        self,
+        n_layers: int = 6,
+        n_heads: int = 8,
+        use_cross_attn: bool = False,
+    ):
         # bypass parent __init__ to set different COND_DIM
         nn.Module.__init__(self)
+        self.use_cross_attn = use_cross_attn
         self.cond_proj  = nn.Linear(COND_DIM, self.DIM)
         self.cond_token_proj = nn.Linear(self.DIM, self.DIM)
         self.time_emb   = SinusoidalTimeEmb(self.DIM)
-        self.blocks     = nn.ModuleList([DiTBlock(self.DIM, n_heads) for _ in range(n_layers)])
+        self.blocks     = nn.ModuleList([
+            DiTBlock(self.DIM, n_heads, use_cross_attn=use_cross_attn)
+            for _ in range(n_layers)
+        ])
         self.final_norm = nn.LayerNorm(self.DIM)
         self.final_proj = nn.Linear(self.DIM, self.DIM)
         nn.init.zeros_(self.final_proj.weight)

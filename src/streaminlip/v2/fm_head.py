@@ -69,17 +69,30 @@ class DiTBlock(nn.Module):
     Attention: bidirectional (no causal mask; FM generation is non-causal).
     """
 
-    def __init__(self, dim: int, num_heads: int = 8, mlp_ratio: float = 4.0):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        mlp_ratio: float = 4.0,
+        use_cross_attn: bool = False,
+    ):
         super().__init__()
         assert dim % num_heads == 0
         self.num_heads = num_heads
         self.head_dim  = dim // num_heads
+        self.use_cross_attn = use_cross_attn
 
         self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
 
         self.qkv      = nn.Linear(dim, 3 * dim, bias=False)
         self.out_proj = nn.Linear(dim, dim, bias=False)
+        if self.use_cross_attn:
+            self.cross_norm = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+            self.cross_q = nn.Linear(dim, dim, bias=False)
+            self.cross_kv = nn.Linear(dim, 2 * dim, bias=False)
+            self.cross_out_proj = nn.Linear(dim, dim, bias=False)
+            self.cross_gate = nn.Parameter(torch.zeros(dim))
 
         mlp_dim = int(dim * mlp_ratio)
         self.ffn = nn.Sequential(
@@ -94,11 +107,19 @@ class DiTBlock(nn.Module):
         nn.init.zeros_(self.adaLN_proj.weight)
         nn.init.zeros_(self.adaLN_proj.bias)
 
-    def forward(self, x: torch.Tensor, cond_vec: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        cond_vec: torch.Tensor,
+        cond_tokens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
-        x:        (B, T_a, dim)
-        cond_vec: (B, dim) = t_emb + mean_pool(cond)
+        x:           (B, T_a, dim)
+        cond_vec:    (B, dim) = t_emb + mean_pool(cond)
+        cond_tokens: (B, T_a, dim), used as cross-attention key/value when enabled.
         """
+        if self.use_cross_attn and cond_tokens is None:
+            raise ValueError("cond_tokens is required when use_cross_attn=True")
         shift1, scale1, gate1, shift2, scale2, gate2 = (
             self.adaLN_proj(cond_vec).chunk(6, dim=-1)  # each (B, dim)
         )
@@ -114,6 +135,20 @@ class DiTBlock(nn.Module):
         attn_out = F.scaled_dot_product_attention(q, k, v)   # bidirectional
         attn_out = attn_out.transpose(1, 2).reshape(B, T, D)
         x = x + g1 * self.out_proj(attn_out)
+
+        if self.use_cross_attn:
+            cross_q = self.cross_q(self.cross_norm(x)).reshape(B, T, self.num_heads, self.head_dim)
+            cross_q = cross_q.transpose(1, 2)
+            Tk = cond_tokens.shape[1]
+            cond_tokens = cond_tokens + sinusoidal_positions(
+                Tk, D, cond_tokens.device, cond_tokens.dtype
+            )
+            cross_kv = self.cross_kv(cond_tokens).reshape(B, Tk, 2, self.num_heads, self.head_dim)
+            cross_kv = cross_kv.permute(2, 0, 3, 1, 4)
+            cross_k, cross_v = cross_kv.unbind(0)
+            cross_out = F.scaled_dot_product_attention(cross_q, cross_k, cross_v)
+            cross_out = cross_out.transpose(1, 2).reshape(B, T, D)
+            x = x + self.cross_gate[None, None, :] * self.cross_out_proj(cross_out)
 
         # FFN branch
         x = x + g2 * self.ffn(self.norm2(x) * (1 + s2) + sh2)
@@ -134,12 +169,21 @@ class FMHead(nn.Module):
 
     DIM = LATENT_DIM  # 512
 
-    def __init__(self, n_layers: int = 6, n_heads: int = 8):
+    def __init__(
+        self,
+        n_layers: int = 6,
+        n_heads: int = 8,
+        use_cross_attn: bool = False,
+    ):
         super().__init__()
+        self.use_cross_attn = use_cross_attn
         self.cond_proj  = nn.Linear(COND_DIM, self.DIM)         # 2176 → 512
         self.cond_token_proj = nn.Linear(self.DIM, self.DIM)
         self.time_emb   = SinusoidalTimeEmb(self.DIM)
-        self.blocks     = nn.ModuleList([DiTBlock(self.DIM, n_heads) for _ in range(n_layers)])
+        self.blocks     = nn.ModuleList([
+            DiTBlock(self.DIM, n_heads, use_cross_attn=use_cross_attn)
+            for _ in range(n_layers)
+        ])
         self.final_norm = nn.LayerNorm(self.DIM)
         # Zero-init final proj for stable startup
         self.final_proj = nn.Linear(self.DIM, self.DIM)
@@ -169,7 +213,7 @@ class FMHead(nn.Module):
         x = x + self.cond_token_proj(cond)
         x = x + sinusoidal_positions(x.shape[1], x.shape[2], x.device, x.dtype)
         for block in self.blocks:
-            x = block(x, cond_vec)
+            x = block(x, cond_vec, cond if self.use_cross_attn else None)
         return self.final_proj(self.final_norm(x))
 
     def forward_train(
