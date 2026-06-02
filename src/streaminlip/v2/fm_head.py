@@ -22,6 +22,22 @@ LATENT_DIM = 512
 COND_DIM   = 960 + 960 + 256   # vis + lm + id = 2176
 
 
+def masked_mse_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    lengths: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """MSE over valid sequence frames only; falls back to full MSE without lengths."""
+    if lengths is None:
+        return F.mse_loss(pred.float(), target.float())
+    lengths = lengths.to(device=pred.device, dtype=torch.long).clamp(min=1, max=pred.shape[1])
+    mask = torch.arange(pred.shape[1], device=pred.device).unsqueeze(0) < lengths.unsqueeze(1)
+    mask = mask.unsqueeze(-1)
+    diff2 = (pred.float() - target.float()).pow(2) * mask
+    denom = (mask.sum() * pred.shape[-1]).clamp_min(1)
+    return diff2.sum() / denom
+
+
 class SinusoidalTimeEmb(nn.Module):
     """Sinusoidal positional encoding for diffusion time t ∈ [0, 1], followed by MLP."""
 
@@ -112,11 +128,13 @@ class DiTBlock(nn.Module):
         x: torch.Tensor,
         cond_vec: torch.Tensor,
         cond_tokens: torch.Tensor | None = None,
+        cond_token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         x:           (B, T_a, dim)
         cond_vec:    (B, dim) = t_emb + mean_pool(cond)
-        cond_tokens: (B, T_a, dim), used as cross-attention key/value when enabled.
+        cond_tokens: (B, T_k, dim), used as cross-attention key/value when enabled.
+        cond_token_mask: optional bool mask (B, T_k), True for valid tokens.
         """
         if self.use_cross_attn and cond_tokens is None:
             raise ValueError("cond_tokens is required when use_cross_attn=True")
@@ -146,7 +164,17 @@ class DiTBlock(nn.Module):
             cross_kv = self.cross_kv(cond_tokens).reshape(B, Tk, 2, self.num_heads, self.head_dim)
             cross_kv = cross_kv.permute(2, 0, 3, 1, 4)
             cross_k, cross_v = cross_kv.unbind(0)
-            cross_out = F.scaled_dot_product_attention(cross_q, cross_k, cross_v)
+            attn_mask = None
+            if cond_token_mask is not None:
+                valid = cond_token_mask.to(device=x.device, dtype=torch.bool)
+                if valid.shape != (B, Tk):
+                    raise ValueError(
+                        f"cond_token_mask shape {tuple(valid.shape)} does not match {(B, Tk)}"
+                    )
+                attn_mask = valid[:, None, None, :]
+            cross_out = F.scaled_dot_product_attention(
+                cross_q, cross_k, cross_v, attn_mask=attn_mask
+            )
             cross_out = cross_out.transpose(1, 2).reshape(B, T, D)
             x = x + self.cross_gate[None, None, :] * self.cross_out_proj(cross_out)
 
@@ -174,11 +202,27 @@ class FMHead(nn.Module):
         n_layers: int = 6,
         n_heads: int = 8,
         use_cross_attn: bool = False,
+        use_text_token_cross_attn: bool = False,
+        extra_cond_dim: int = 0,
+        ctc_vocab_size: int = 0,
+        ctc_topk: int = 0,
+        ctc_token_emb_dim: int = 0,
     ):
         super().__init__()
         self.use_cross_attn = use_cross_attn
-        self.cond_proj  = nn.Linear(COND_DIM, self.DIM)         # 2176 → 512
+        self.use_text_token_cross_attn = use_text_token_cross_attn
+        self.extra_cond_dim = extra_cond_dim
+        self.ctc_topk = ctc_topk
+        self.ctc_token_emb_dim = ctc_token_emb_dim
+        ctc_cond_dim = ctc_token_emb_dim + ctc_topk if ctc_topk > 0 else 0
+        self.ctc_token_emb = None
+        if ctc_topk > 0:
+            if ctc_vocab_size <= 0 or ctc_token_emb_dim <= 0:
+                raise ValueError("ctc top-k condition requires positive vocab and embedding dims")
+            self.ctc_token_emb = nn.Embedding(ctc_vocab_size, ctc_token_emb_dim)
+        self.cond_proj  = nn.Linear(COND_DIM + extra_cond_dim + ctc_cond_dim, self.DIM)  # condition → 512
         self.cond_token_proj = nn.Linear(self.DIM, self.DIM)
+        self.text_token_proj = nn.Linear(960, self.DIM)
         self.time_emb   = SinusoidalTimeEmb(self.DIM)
         self.blocks     = nn.ModuleList([
             DiTBlock(self.DIM, n_heads, use_cross_attn=use_cross_attn)
@@ -195,26 +239,106 @@ class FMHead(nn.Module):
         vis_down: torch.Tensor,   # (B, T_a, 960)
         h_down:   torch.Tensor,   # (B, T_a, 960)
         id_vec:   torch.Tensor,   # (B, 256)
-    ) -> torch.Tensor:
+        text_tokens: torch.Tensor | None = None,  # (B, L, 960)
+        extra_cond: torch.Tensor | None = None,  # (B, T_a, extra_cond_dim)
+        ctc_topk_ids: torch.Tensor | None = None,  # (B, T_a, K)
+        ctc_topk_probs: torch.Tensor | None = None,  # (B, T_a, K)
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
         """Concatenate and project to (B, T_a, 512)."""
         T_a    = vis_down.shape[1]
         id_exp = id_vec.unsqueeze(1).expand(-1, T_a, -1)           # (B, T_a, 256)
-        cat    = torch.cat([vis_down, h_down, id_exp], dim=-1)      # (B, T_a, 2176)
-        return self.cond_proj(cat)                                  # (B, T_a, 512)
+        parts = [vis_down, h_down, id_exp]
+        if self.extra_cond_dim > 0:
+            if extra_cond is None:
+                extra_cond = torch.zeros(
+                    *vis_down.shape[:2],
+                    self.extra_cond_dim,
+                    device=vis_down.device,
+                    dtype=vis_down.dtype,
+                )
+            parts.append(extra_cond.to(device=vis_down.device, dtype=vis_down.dtype))
+        if self.ctc_topk > 0:
+            if ctc_topk_ids is None:
+                ctc_topk_ids = torch.zeros(
+                    *vis_down.shape[:2],
+                    self.ctc_topk,
+                    device=vis_down.device,
+                    dtype=torch.long,
+                )
+            if ctc_topk_probs is None:
+                ctc_topk_probs = torch.zeros(
+                    *vis_down.shape[:2],
+                    self.ctc_topk,
+                    device=vis_down.device,
+                    dtype=vis_down.dtype,
+                )
+            ctc_topk_ids = ctc_topk_ids.to(device=vis_down.device, dtype=torch.long)
+            ctc_topk_probs = ctc_topk_probs.to(device=vis_down.device, dtype=vis_down.dtype)
+            if ctc_topk_ids.shape[:2] != vis_down.shape[:2] or ctc_topk_ids.shape[-1] != self.ctc_topk:
+                raise ValueError("ctc_topk_ids shape must be (B, T_a, ctc_topk)")
+            if ctc_topk_probs.shape != ctc_topk_ids.shape:
+                raise ValueError("ctc_topk_probs shape must match ctc_topk_ids")
+            emb = self.ctc_token_emb(ctc_topk_ids).to(dtype=vis_down.dtype)
+            weighted_emb = (emb * ctc_topk_probs.unsqueeze(-1)).sum(dim=2)
+            parts.extend([weighted_emb, ctc_topk_probs])
+        cat = torch.cat(parts, dim=-1)
+        cond = self.cond_proj(cat)
+        if not self.use_text_token_cross_attn:
+            return cond
+        if text_tokens is None:
+            return cond, None
+        return cond, self.text_token_proj(text_tokens.to(dtype=cond.dtype))
 
     def _forward_dit(
         self,
         x:    torch.Tensor,   # (B, T_a, 512)
         cond: torch.Tensor,   # (B, T_a, 512)
         t:    torch.Tensor,   # (B,)
+        cond_tokens: torch.Tensor | None = None,
+        cond_token_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         t_emb    = self.time_emb(t)          # (B, 512)
         cond_vec = t_emb + cond.mean(dim=1)  # (B, 512): t_emb + mean_pool(cond)
         x = x + self.cond_token_proj(cond)
         x = x + sinusoidal_positions(x.shape[1], x.shape[2], x.device, x.dtype)
+        if cond_tokens is None:
+            cond_tokens = cond
+        if cond_token_mask is None and cond_tokens is cond:
+            cond_token_mask = torch.ones(
+                cond.shape[:2], device=cond.device, dtype=torch.bool
+            )
         for block in self.blocks:
-            x = block(x, cond_vec, cond if self.use_cross_attn else None)
+            x = block(
+                x,
+                cond_vec,
+                cond_tokens if self.use_cross_attn else None,
+                cond_token_mask if self.use_cross_attn else None,
+            )
         return self.final_proj(self.final_norm(x))
+
+    def _build_cond_parts(
+        self,
+        vis_down: torch.Tensor,
+        h_down: torch.Tensor,
+        id_vec: torch.Tensor,
+        text_tokens: torch.Tensor | None = None,
+        text_token_mask: torch.Tensor | None = None,
+        extra_cond: torch.Tensor | None = None,
+        ctc_topk_ids: torch.Tensor | None = None,
+        ctc_topk_probs: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        built = self._build_cond(
+            vis_down, h_down, id_vec,
+            text_tokens=text_tokens,
+            extra_cond=extra_cond,
+            ctc_topk_ids=ctc_topk_ids,
+            ctc_topk_probs=ctc_topk_probs,
+        )
+        if isinstance(built, tuple):
+            cond, cond_tokens = built
+        else:
+            cond, cond_tokens = built, None
+        return cond, cond_tokens, text_token_mask
 
     def forward_train(
         self,
@@ -222,32 +346,87 @@ class FMHead(nn.Module):
         h_down:   torch.Tensor,   # (B, T_a, 960) — sg already applied by caller
         id_vec:   torch.Tensor,   # (B, 256)
         x_1:      torch.Tensor,   # (B, T_a, 512) target latent
+        lengths:  torch.Tensor | None = None,
+        text_tokens: torch.Tensor | None = None,
+        text_token_mask: torch.Tensor | None = None,
+        extra_cond: torch.Tensor | None = None,
+        ctc_topk_ids: torch.Tensor | None = None,
+        ctc_topk_probs: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """OT-CFM loss: E||v_θ(x_t, c, t) - (x_1 - x_0)||²"""
         # Unify dtype to match model weights (handles float32/bfloat16 mixed input)
         dtype = next(self.parameters()).dtype
         x_1   = x_1.to(dtype)
-        cond  = self._build_cond(vis_down, h_down, id_vec)   # (B, T_a, 512)
+        cond, cond_tokens, cond_token_mask = self._build_cond_parts(
+            vis_down, h_down, id_vec,
+            text_tokens=text_tokens,
+            text_token_mask=text_token_mask,
+            extra_cond=extra_cond,
+            ctc_topk_ids=ctc_topk_ids,
+            ctc_topk_probs=ctc_topk_probs,
+        )
 
         B   = x_1.shape[0]
         t   = torch.rand(B, device=x_1.device, dtype=dtype)
         x_0 = torch.randn_like(x_1)
         x_t = (1 - t[:, None, None]) * x_0 + t[:, None, None] * x_1
 
-        pred = self._forward_dit(x_t, cond, t)
-        return F.mse_loss(pred.float(), (x_1 - x_0).float())
+        pred = self._forward_dit(x_t, cond, t, cond_tokens, cond_token_mask)
+        return masked_mse_loss(pred, x_1 - x_0, lengths)
 
     def reconstruct_from_cond(
         self,
         vis_down: torch.Tensor,
         h_down: torch.Tensor,
         id_vec: torch.Tensor,
+        text_tokens: torch.Tensor | None = None,
+        text_token_mask: torch.Tensor | None = None,
+        extra_cond: torch.Tensor | None = None,
+        ctc_topk_ids: torch.Tensor | None = None,
+        ctc_topk_probs: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Deterministic probe: predict x_1 directly from aligned conditions."""
-        cond = self._build_cond(vis_down, h_down, id_vec)
+        cond, cond_tokens, cond_token_mask = self._build_cond_parts(
+            vis_down, h_down, id_vec,
+            text_tokens=text_tokens,
+            text_token_mask=text_token_mask,
+            extra_cond=extra_cond,
+            ctc_topk_ids=ctc_topk_ids,
+            ctc_topk_probs=ctc_topk_probs,
+        )
         x = torch.zeros_like(cond)
         t = torch.ones(cond.shape[0], device=cond.device, dtype=cond.dtype)
-        return self._forward_dit(x, cond, t)
+        return self._forward_dit(x, cond, t, cond_tokens, cond_token_mask)
+
+    def denoise_from_noise(
+        self,
+        vis_down: torch.Tensor,
+        h_down: torch.Tensor,
+        id_vec: torch.Tensor,
+        noise: torch.Tensor,
+        t: torch.Tensor | None = None,
+        text_tokens: torch.Tensor | None = None,
+        text_token_mask: torch.Tensor | None = None,
+        extra_cond: torch.Tensor | None = None,
+        ctc_topk_ids: torch.Tensor | None = None,
+        ctc_topk_probs: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Endpoint denoiser: predict x_1 directly from noisy latent tokens."""
+        dtype = next(self.parameters()).dtype
+        cond, cond_tokens, cond_token_mask = self._build_cond_parts(
+            vis_down, h_down, id_vec,
+            text_tokens=text_tokens,
+            text_token_mask=text_token_mask,
+            extra_cond=extra_cond,
+            ctc_topk_ids=ctc_topk_ids,
+            ctc_topk_probs=ctc_topk_probs,
+        )
+        noise = noise.to(device=cond.device, dtype=dtype)
+        if t is None:
+            t = torch.zeros(cond.shape[0], device=cond.device, dtype=dtype)
+        else:
+            t = t.to(device=cond.device, dtype=dtype)
+        return self._forward_dit(noise, cond, t, cond_tokens, cond_token_mask)
 
     def sample(
         self,
@@ -255,16 +434,30 @@ class FMHead(nn.Module):
         h_down:   torch.Tensor,   # (B, T_a, 960)
         id_vec:   torch.Tensor,   # (B, 256)
         nfe:      int = 10,
+        text_tokens: torch.Tensor | None = None,
+        text_token_mask: torch.Tensor | None = None,
+        extra_cond: torch.Tensor | None = None,
+        ctc_topk_ids: torch.Tensor | None = None,
+        ctc_topk_probs: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Euler solver. Keeps gradients so endpoint losses can train sampling."""
-        cond = self._build_cond(vis_down, h_down, id_vec)
+        cond, cond_tokens, cond_token_mask = self._build_cond_parts(
+            vis_down, h_down, id_vec,
+            text_tokens=text_tokens,
+            text_token_mask=text_token_mask,
+            extra_cond=extra_cond,
+            ctc_topk_ids=ctc_topk_ids,
+            ctc_topk_probs=ctc_topk_probs,
+        )
         B, T_a, _ = cond.shape
 
         x  = torch.randn(B, T_a, self.DIM, device=cond.device, dtype=cond.dtype)
         dt = 1.0 / nfe
         for step in range(nfe):
             t = torch.full((B,), step / nfe, device=cond.device, dtype=cond.dtype)
-            x = x + dt * self._forward_dit(x, cond, t)
+            x = x + dt * self._forward_dit(
+                x, cond, t, cond_tokens, cond_token_mask
+            )
         return x
 
     @torch.no_grad()
@@ -274,6 +467,18 @@ class FMHead(nn.Module):
         h_down:   torch.Tensor,   # (B, T_a, 960)
         id_vec:   torch.Tensor,   # (B, 256)
         nfe:      int = 10,
+        text_tokens: torch.Tensor | None = None,
+        text_token_mask: torch.Tensor | None = None,
+        extra_cond: torch.Tensor | None = None,
+        ctc_topk_ids: torch.Tensor | None = None,
+        ctc_topk_probs: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """No-grad Euler solver for evaluation/inference."""
-        return self.sample(vis_down, h_down, id_vec, nfe=nfe)
+        return self.sample(
+            vis_down, h_down, id_vec, nfe=nfe,
+            text_tokens=text_tokens,
+            text_token_mask=text_token_mask,
+            extra_cond=extra_cond,
+            ctc_topk_ids=ctc_topk_ids,
+            ctc_topk_probs=ctc_topk_probs,
+        )

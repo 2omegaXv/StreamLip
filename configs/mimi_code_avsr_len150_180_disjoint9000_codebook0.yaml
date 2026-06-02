@@ -1,0 +1,21 @@
+data_root: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed
+code_cache_root: data/mimi_code_cache_len150_180_9000
+clip_list: configs/eval_splits/pretrain_len150_180_disjoint_train9000_seed52.txt
+val_clip_list: configs/eval_splits/pretrain_len150_180_disjoint_heldout1000_seed52.txt
+output_dir: runs/mimi_code_avsr
+run_name: len150_180_disjoint9000_codebook0_v1
+
+codebook: 0
+condition_mode: video_spk
+n_layers: 4
+dim: 512
+n_heads: 8
+dropout: 0.0
+label_smoothing: 0.0
+
+batch_size: 64
+num_workers: 8
+lr: 0.0003
+max_steps: 3000
+eval_every: 500
+save_every: 1000

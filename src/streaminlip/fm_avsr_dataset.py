@@ -3,12 +3,13 @@ Minimal dataset for FM head training with Auto-AVSR features.
 Loads pre-extracted: avsr_enc.npy + avsr_text.txt + latent.npz + speaker_emb.npy
 No heavy preprocessing — just numpy loads.
 """
-import csv, numpy as np, torch
+import csv, json, re, difflib, numpy as np, torch
 from pathlib import Path
 from torch.utils.data import Dataset
 
 _MAX_TA = 400  # ~32s at 12.5Hz; clips beyond this waste memory due to padding
 _MAX_L  = 256  # max SmolLM2 tokens; ~30s speech at typical speaking rate
+_LATENT_HZ = 12.5
 
 # Per-dim latent normalization stats (computed from training set)
 _lat_mean: np.ndarray | None = None
@@ -72,6 +73,128 @@ def validate_latent_frame_rate(
     return lat
 
 
+def _norm_word(word: str) -> str:
+    word = re.sub(r"[^a-z0-9]", "", word.lower())
+    if len(word) > 3 and word.endswith("s"):
+        word = word[:-1]
+    return word
+
+
+def read_clip_text(clip: str | Path, text_source: str = "avsr") -> str:
+    clip = Path(clip)
+    if text_source == "text_json":
+        meta_path = clip / "text.json"
+        if meta_path.exists():
+            meta = json.loads(meta_path.read_text())
+            words = [
+                str(w.get("word", "")).strip()
+                for w in meta.get("words", [])
+                if str(w.get("word", "")).strip()
+            ]
+            text = " ".join(words).strip()
+            if text:
+                return re.sub(r"\s+", " ", text)
+    if text_source != "avsr":
+        raise ValueError(f"unknown text_source={text_source!r}")
+    return re.sub(r"\s+", " ", (clip / "avsr_text.txt").read_text()).strip()
+
+
+def smollm2_hidden_path(clip: str | Path, text_source: str = "avsr") -> Path:
+    name = "smollm2_h_text_json.npy" if text_source == "text_json" else "smollm2_h.npy"
+    return Path(clip) / name
+
+
+def _assign_text_word_times(text_words: list[str], words: list[dict]) -> list[tuple[float, float]]:
+    """Align AVSR transcript words to timestamped words, interpolating unmatched spans."""
+    timed_norm = [_norm_word(w.get("word", "")) for w in words]
+    text_norm = [_norm_word(w) for w in text_words]
+    assigned: list[tuple[float, float] | None] = [None] * len(text_words)
+
+    matcher = difflib.SequenceMatcher(a=text_norm, b=timed_norm, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for off in range(i2 - i1):
+                w = words[j1 + off]
+                assigned[i1 + off] = (float(w["start"]), float(w["end"]))
+            continue
+        if i1 == i2:
+            continue
+        if j1 < j2:
+            start = float(words[j1]["start"])
+            end = float(words[j2 - 1]["end"])
+        else:
+            start = float(words[j1 - 1]["end"]) if j1 > 0 else 0.0
+            end = float(words[j1]["start"]) if j1 < len(words) else start
+        span = max(end - start, 1e-4)
+        n = i2 - i1
+        for k in range(n):
+            t0 = start + span * k / n
+            t1 = start + span * (k + 1) / n
+            assigned[i1 + k] = (t0, t1)
+
+    last_end = 0.0
+    for i, cur in enumerate(assigned):
+        if cur is not None:
+            last_end = cur[1]
+            continue
+        next_start = None
+        for nxt in assigned[i + 1:]:
+            if nxt is not None:
+                next_start = nxt[0]
+                break
+        end = next_start if next_start is not None else last_end
+        assigned[i] = (last_end, max(last_end, end))
+    return [(float(s), float(e)) for s, e in assigned]
+
+
+def build_word_timestamp_lm_indices(
+    text: str,
+    words: list[dict],
+    tokenizer,
+    T_a: int,
+    latent_hz: float = _LATENT_HZ,
+) -> np.ndarray:
+    """Map each latent frame to the committed SmolLM2 hidden-state index.
+
+    `smollm2_h.npy` is extracted as [BOS, token1, token2, ...] from
+    `avsr_text.txt`. This function uses `text.json` word timestamps to choose
+    which hidden-state position should condition each audio-latent frame.
+    Silence and gaps hold the last committed token.
+    """
+    idx = np.zeros(T_a, dtype=np.int64)
+    text_words = text.upper().split()
+    if T_a <= 0 or not text_words or tokenizer is None:
+        return idx
+
+    word_times = _assign_text_word_times(text_words, words or [])
+    pos = 1  # 0 is BOS
+    for word, (start, end) in zip(text_words, word_times):
+        toks = tokenizer.encode(" " + word.lower(), add_special_tokens=False)
+        if not toks:
+            continue
+        dur = max(end - start, 1e-4)
+        tok_text = [tokenizer.decode([t]).strip() for t in toks]
+        weights = [max(len(t), 1) for t in tok_text]
+        total = sum(weights)
+        cursor = 0.0
+        for n_chars in weights:
+            t0 = start + dur * cursor / total
+            t1 = start + dur * (cursor + n_chars) / total
+            f0 = max(0, min(T_a, int(np.floor(t0 * latent_hz))))
+            f1 = max(f0 + 1, min(T_a, int(np.ceil(t1 * latent_hz))))
+            idx[f0:f1] = pos
+            pos += 1
+            cursor += n_chars
+
+    last = 0
+    for i, value in enumerate(idx):
+        if value > 0:
+            last = int(value)
+        else:
+            idx[i] = last
+    return idx
+
+
 class FMAVSRDataset(Dataset):
     def __init__(
         self,
@@ -81,6 +204,9 @@ class FMAVSRDataset(Dataset):
         test_reserve:   int = 2000,
         limit:          int | None = None,
         clip_list:      str | None = None,
+        tokenizer=None,
+        text_alignment_mode: str = "uniform",
+        text_source: str = "avsr",
     ):
         root = Path(processed_root)
         set_norm_stats_path(root / "latent_norm_stats.npz")
@@ -112,6 +238,9 @@ class FMAVSRDataset(Dataset):
         if limit:
             clips = clips[:limit]
         self.clips = clips
+        self.tokenizer = tokenizer
+        self.text_alignment_mode = text_alignment_mode
+        self.text_source = text_source
         print(f"[FMAVSRDataset] split={split}/{subset}  clips={len(self.clips)}")
 
     def __len__(self): return len(self.clips)
@@ -130,12 +259,21 @@ class FMAVSRDataset(Dataset):
         lat = normalize_latent(lat)
         spk = np.load(str(c/"speaker_emb.npy")).astype("float32")  # (256,)
         # Pre-extracted SmolLM2 hidden states (L, 960) float16 — fast NFS load
-        h_path = c / "smollm2_h.npy"
+        h_path = smollm2_hidden_path(c, self.text_source)
         h_lm = np.load(str(h_path)).astype("float32") if h_path.exists() else None
         if h_lm is not None and h_lm.shape[0] > _MAX_L:
             h_lm = h_lm[:_MAX_L]
-        txt = (c/"avsr_text.txt").read_text().strip()
-        return {"enc": enc, "latent": lat, "speaker": spk, "h_lm": h_lm, "text": txt}
+        txt = read_clip_text(c, self.text_source)
+        lm_idx = None
+        if self.text_alignment_mode == "word_timestamps" and self.tokenizer is not None:
+            meta = json.loads((c / "text.json").read_text())
+            lm_idx = build_word_timestamp_lm_indices(
+                txt, meta.get("words", []), self.tokenizer, lat.shape[0]
+            )
+        return {
+            "enc": enc, "latent": lat, "speaker": spk, "h_lm": h_lm,
+            "text": txt, "lm_idx": lm_idx,
+        }
 
 
 def collate_fn(batch):
@@ -143,10 +281,14 @@ def collate_fn(batch):
     max_T  = max(b["enc"].shape[0] for b in batch)
     max_Ta = max(b["latent"].shape[0] for b in batch)
     B = len(batch)
+    enc_lens    = np.array([b["enc"].shape[0] for b in batch], dtype=np.int64)
+    latent_lens = np.array([b["latent"].shape[0] for b in batch], dtype=np.int64)
     enc    = np.zeros((B, max_T, 768),  dtype=np.float32)
     latent = np.zeros((B, max_Ta, 512), dtype=np.float32)
     spk    = np.stack([b["speaker"] for b in batch])   # (B, 256)
     texts  = [b["text"] for b in batch]
+    has_lm_idx = all(b.get("lm_idx") is not None for b in batch)
+    lm_idx = np.zeros((B, max_Ta), dtype=np.int64) if has_lm_idx else None
     # h_lm: (B, max_L, 960) — None if not yet extracted
     has_h_lm = all(b["h_lm"] is not None for b in batch)
     if has_h_lm:
@@ -164,5 +306,9 @@ def collate_fn(batch):
         Ta = b["latent"].shape[0]
         enc[i, :T]     = b["enc"]
         latent[i, :Ta] = b["latent"]
+        if has_lm_idx:
+            lm_idx[i, :Ta] = b["lm_idx"][:Ta]
     return {"enc": enc, "latent": latent, "speaker": spk,
-            "h_lm": h_lm, "lens_L": lens_L, "texts": texts}
+            "enc_lens": enc_lens, "latent_lens": latent_lens,
+            "h_lm": h_lm, "lens_L": lens_L, "texts": texts,
+            "lm_idx": lm_idx}

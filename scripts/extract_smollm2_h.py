@@ -23,6 +23,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from streaminlip.fm_avsr_dataset import read_clip_text, smollm2_hidden_path
 
 
 def parse_args():
@@ -31,6 +32,9 @@ def parse_args():
     p.add_argument("--smollm2_path", default="pretrained/smollm2-360m")
     p.add_argument("--split",        default="pretrain")
     p.add_argument("--batch_size",   type=int, default=256)
+    p.add_argument("--clip_list",    default=None,
+                   help="Optional file with one processed clip path per line.")
+    p.add_argument("--text_source",  choices=["avsr", "text_json"], default="avsr")
     p.add_argument("--overwrite",    action="store_true")
     return p.parse_args()
 
@@ -48,18 +52,25 @@ def main():
     bos = lm.config.bos_token_id or 0
     print("SmolLM2 loaded.")
 
-    # collect clips that have avsr_text.txt
-    cache = root / f"_fm_avsr_{args.split}.txt"
-    if cache.exists():
-        clips = [root / p for p in cache.read_text().split()]
+    # collect clips that have text inputs
+    if args.clip_list:
+        clips = [
+            root / line.strip()
+            for line in Path(args.clip_list).read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
     else:
-        clips = [root / r["path"]
-                 for r in csv.DictReader(open(root / "manifest.csv"))
-                 if r["split"] == args.split
-                 and (root / r["path"] / "avsr_text.txt").exists()]
+        cache = root / f"_fm_avsr_{args.split}.txt"
+        if cache.exists() and args.text_source == "avsr":
+            clips = [root / p for p in cache.read_text().split()]
+        else:
+            clips = [root / r["path"]
+                     for r in csv.DictReader(open(root / "manifest.csv"))
+                     if r["split"] == args.split
+                     and (root / r["path"] / "text.json").exists()]
 
     if not args.overwrite:
-        clips = [c for c in clips if not (c / "smollm2_h.npy").exists()]
+        clips = [c for c in clips if not smollm2_hidden_path(c, args.text_source).exists()]
     print(f"Clips to process: {len(clips)}")
 
     done = skip = err = 0
@@ -68,15 +79,22 @@ def main():
 
         # Tokenize
         all_tokens = []
+        kept_clips = []
         for c in batch_clips:
-            txt = (c / "avsr_text.txt").read_text().strip()
+            txt = read_clip_text(c, args.text_source)
+            if not txt:
+                skip += 1
+                continue
             tokens = [bos]
             for w in txt.upper().split():
                 tokens += tok.encode(" " + w.lower(), add_special_tokens=False)
             all_tokens.append(tokens)
+            kept_clips.append(c)
+        if not all_tokens:
+            continue
 
         max_L = max(len(t) for t in all_tokens)
-        B     = len(batch_clips)
+        B     = len(kept_clips)
         ids   = torch.zeros(B, max_L, dtype=torch.long,  device=device)
         amask = torch.zeros(B, max_L, dtype=torch.long,  device=device)
         for b, tokens in enumerate(all_tokens):
@@ -93,7 +111,7 @@ def main():
             torch.cuda.empty_cache()
             sub = max(1, args.batch_size // 4)
             for j in range(0, B, sub):
-                sub_clips  = batch_clips[j : j + sub]
+                sub_clips  = kept_clips[j : j + sub]
                 sub_tokens = all_tokens[j : j + sub]
                 sub_L = max(len(t) for t in sub_tokens)
                 bs    = len(sub_clips)
@@ -109,14 +127,14 @@ def main():
                 for k, (c, tokens) in enumerate(zip(sub_clips, sub_tokens)):
                     L   = len(tokens)
                     out = sub_h[k, :L].float().cpu().numpy().astype(np.float16)
-                    np.save(str(c / "smollm2_h.npy"), out)
+                    np.save(str(smollm2_hidden_path(c, args.text_source)), out)
                     done += 1
             continue
 
-        for b, (c, tokens) in enumerate(zip(batch_clips, all_tokens)):
+        for b, (c, tokens) in enumerate(zip(kept_clips, all_tokens)):
             L   = len(tokens)
             out = h[b, :L].float().cpu().numpy().astype(np.float16)  # (L, 960)
-            np.save(str(c / "smollm2_h.npy"), out)
+            np.save(str(smollm2_hidden_path(c, args.text_source)), out)
             done += 1
 
     print(f"Done: {done}  Skip: {skip}  Err: {err}")
