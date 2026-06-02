@@ -623,3 +623,57 @@ The next implementation step is to turn this smoke test into an offline teacher-
 5. Train a video-conditioned student against these teacher Mimi targets before returning to FM/AR generation.
 
 This is now a feasible local path; it still does not complete the `eval > 0.5` objective, but it gives a concrete route beyond the failed small-adapter experiments.
+
+## 2026-06-02 final local feasibility gate
+
+After the split-leakage and text-source fixes, I re-checked whether there is any remaining local, short-run experiment that can credibly push clean eval above `0.5` without introducing a pretrained generative speech prior.
+
+### Clean metric ceiling observed so far
+
+Across the existing FM validation CSVs, the best clean correlations found were:
+
+```text
+best val_sample_corr:  ~0.358
+best val_recon_corr:   ~0.422
+best val_denoise_corr: ~0.419
+```
+
+The discrete Mimi-code diagnostic does not rescue the situation. After removing train/val leakage, codebook0 held-out accuracy is around `0.18-0.22`, far below `0.5`.
+
+### Current local resource state
+
+Installed/importable Python packages:
+
+```text
+pocket-tts: available
+torch/torchaudio/transformers: available
+moshi: not installed
+encodec: not installed
+```
+
+Local pretrained files under `pretrained/`:
+
+```text
+mimi/                         codec only
+smollm2-360m/                 text LM only
+gemma-3-1b/                   text LM only
+av-hubert/model.pt            encoder
+self_large_vox_433h.pt        encoder
+auto_avsr/vsr_*.pth           encoder + CTC head
+```
+
+There is still no local Moshi/Kyutai TTS 1.6B/AudioLM-style audio-token generator checkpoint. Pocket TTS is installed and can generate teacher audio, but its output is not time-aligned to the original video clip duration. It is therefore useful for teacher/prior prototyping, not as a direct frame-aligned ground-truth target.
+
+### Decision
+
+The current local setup has no remaining credible 1-2 hour experiment that should be expected to jump from the observed `~0.35` sampled-correlation plateau to `>0.5`. The limiting factor is not a small missing adapter; it is the absence of a generative speech/audio-token prior.
+
+The next required architecture step is one of:
+
+```text
+1. Add a pretrained Mimi-token speech generator such as Moshi/Kyutai TTS 1.6B and train video/text/speaker adapters.
+2. Build a teacher-distillation pipeline using Pocket TTS or a stronger TTS model, with explicit duration/alignment handling.
+3. Train an AR/DSM Mimi-token model with enough speech prior capacity, then condition/adapt it to lip/video evidence.
+```
+
+Until one of those prior/distillation paths is introduced, more local runs of the current direct FM/regression/codebook heads are expected to reproduce the same plateau rather than reach `eval > 0.5`.
