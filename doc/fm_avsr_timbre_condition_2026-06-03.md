@@ -310,7 +310,9 @@ Combined 59,144 split:
 | 50k residual + timbre-stats loss | 1500 | 0.58105725 | 0.66844833 | 0.60244348 | `lambda_timbre_stats=0.2`, `lambda_recon_corr=0.05` |
 | 50k residual + frozen-base latent condition | 500 | 0.58072395 | 0.66876355 | 0.60250444 | residual head also receives frozen base recon latent |
 | 59k pooled prompt continuation | 5000 | 0.58143902 | 0.66799185 | 0.60200530 | resumed 50k base step4000, lr `5e-5` |
-| 59k residual from step5000 | 1000 | 0.58167589 | 0.66776208 | 0.60182909 | best verified full eval in this note |
+| 59k residual from step5000 | 1000 | 0.58167589 | 0.66776208 | 0.60182909 | previous best full eval |
+| 59k residual + denoise loss | 1250 | 0.58173362 | 0.66768414 | 0.60181177 | `lambda_denoise=0.1`, `denoise_t=[0, 0.1]` |
+| 59k residual + denoise loss | 1500 | 0.58176819 | 0.66763995 | 0.60180507 | current best verified full eval |
 
 The 50k scale-up improved the best full eval from `0.57255184` to
 `0.58091919`. Residual timbre-stat continuation added only `+0.00013806`
@@ -319,8 +321,26 @@ meaningful path toward `0.6`.
 
 The 59k scale-up is directionally positive but still small. It improved the
 base full eval from `0.58013729` to `0.58143902`, and residual refinement on
-that base reached `0.58167589`. This is the current best full-val metric, but
-it is still far below the target `0.6`.
+that base reached `0.58167589`. A short denoise-endpoint continuation moved the
+best full-val metric only to `0.58176819`, so it is still far below the target
+`0.6`.
+
+The denoise continuation resumed
+`runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_residual_from5000_recon_textjson_wordts_v1/step_001000.pt`
+with frozen base
+`runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_from4000_recon_textjson_wordts_v1/step_005000.pt`,
+`lr=5e-5`, `lambda_recon=1.0`, `lambda_denoise=0.1`, and
+`denoise_t_min/max=0/0.1`. It stayed within the 1-hour budget. The small
+training-val improvement did not translate into a meaningful full-eval jump.
+
+While validating this run, an eval config bug was found: `eval_fm_avsr.py`
+accepted `--residual_base_ckpt`, but did not load `residual_base_ckpt` from YAML
+configs. This made residual checkpoints evaluate as raw residuals unless the
+base checkpoint was passed explicitly on the command line. The bad symptom was
+a false full-eval corr around `0.038`. The parser now loads
+`residual_base_ckpt` from config and is covered by a unit test. The valid
+denoise rows above are the `fixbase` evals, whose logs explicitly loaded the
+frozen residual baseline.
 
 The GT-energy diagnostic moved the 50k base only from `0.58013729` to
 `0.58030405`. This rules out predicted log-RMS energy as the main bottleneck in
@@ -393,7 +413,8 @@ calibration, and post-prompt timbre-stat matching all add almost nothing after
 residual training. Passing the frozen base reconstruction back in as a residual
 condition also fails to improve full eval. Adding the remaining 9,144 ready
 lip-AVSR clips is the strongest positive move in the latest batch, but it only
-raises full eval to `0.58167589`. The remaining gap to 0.6 is likely not just
+raises full eval to `0.58167589`, and a light denoise endpoint continuation only
+raises it further to `0.58176819`. The remaining gap to 0.6 is likely not just
 "missing speaker identity"; the deterministic MSE-style latent head is still
 averaging over speaker and spectral detail that is not recoverable from the
 current condition fusion.
@@ -410,5 +431,7 @@ Code support for `timbre_cond` and `audio_prompt` was covered by unit tests:
 
 - `uv run python -m unittest tests.test_fm_avsr_dataset tests.test_timbre_condition tests.test_eval_fm_avsr tests.test_fm_head_temporal_condition -v`
 - `uv run python -m py_compile scripts/train_fm_avsr.py scripts/eval_fm_avsr.py src/streaminlip/fm_avsr_dataset.py src/streaminlip/v2/fm_head.py`
+- `uv run python -m unittest tests.test_eval_fm_avsr tests.test_fm_avsr_dataset -v`
+- `uv run python -m py_compile scripts/eval_fm_avsr.py scripts/train_fm_avsr.py`
 
 All individual training/eval runs in this note were kept under the 1-hour limit.

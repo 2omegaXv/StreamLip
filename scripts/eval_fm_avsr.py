@@ -207,7 +207,7 @@ def parse_args():
                        "audio_prompt_frames", "audio_prompt_dim", "audio_prompt_pool_cond",
                        "ctc_condition_mode", "auto_avsr_ckpt", "ctc_vocab_size",
                        "ctc_topk", "ctc_token_emb_dim", "energy_condition_mode",
-                       "residual_base_condition",
+                       "residual_base_ckpt", "residual_base_condition",
                        "n_dit_layers", "use_cross_attn", "use_text_token_cross_attn",
                        "metric_start_frame"}
         for k, v in cfg.items():

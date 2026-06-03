@@ -81,6 +81,25 @@ class EvalFMAVSRTest(unittest.TestCase):
         self.assertEqual(args.text_source, "text_json")
         self.assertEqual(args.visual_feature_name, "avsr_enc_lipavsr.npy")
 
+    def test_parse_args_loads_residual_base_ckpt_from_config(self):
+        old_argv = sys.argv
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+                f.write("residual_base_ckpt: runs/fm_avsr/base.pt\n")
+                f.flush()
+                sys.argv = [
+                    "scripts/eval_fm_avsr.py",
+                    "--config",
+                    f.name,
+                    "--ckpt",
+                    "dummy.pt",
+                ]
+                args = eval_fm_avsr.parse_args()
+        finally:
+            sys.argv = old_argv
+
+        self.assertEqual(args.residual_base_ckpt, "runs/fm_avsr/base.pt")
+
     def test_eval_metric_target_should_use_normalized_latent(self):
         with tempfile.TemporaryDirectory() as tmp:
             stats = Path(tmp) / "stats.npz"
