@@ -92,6 +92,7 @@ stopping in mind.
 | 30k mean/std + audio prompt tokens | 3000 | 0.56967886 | 0.68265299 | 0.60941165 | full 1k eval, 2500-step continuation |
 | 30k mean/std + audio prompt tokens + pooled prompt cond | 2500 | 0.56971665 | 0.68110923 | 0.61001512 | full 1k eval |
 | 30k audio prompt tokens + loss start 38 | 1000 | n/a | n/a | n/a | early stopped; training-val corr 0.54083031 |
+| 30k pooled prompt, 8 DiT layers | 2000 | n/a | n/a | n/a | early stopped; training-val corr 0.56734583 |
 | 30k audio prompt tokens, shifted condition | 2500 | 0.00798798 | 1.28502175 | 0.87642337 | full 1k negative control, `condition_shift=1` |
 
 The best verified full-eval result is `0.56971665` from the pooled audio prompt
@@ -161,6 +162,26 @@ prompt segment that eval skips.
 It was early stopped after step1000 because it trailed the token-only prompt run
 at both shared checkpoints (`0.5148` vs `0.5162` at 500, `0.5408` vs `0.5466` at
 1000). Skipping the prompt segment in the loss did not help.
+
+### Larger 8-Layer DiT Head
+
+Run:
+`runs/fm_avsr/lipavsr_30000_timbre3s_audioprompt38_pool_8l_recon_textjson_wordts_v1`
+
+This variant keeps pooled audio prompt conditioning and increases the FM head
+from 6 to 8 DiT layers. Parameter count increases from 39.8M to 51.4M.
+
+| Step | Val recon corr | Elapsed |
+| ---: | ---: | ---: |
+| 500 | 0.51769584 | 337.9654s |
+| 1000 | 0.54591195 | 650.9076s |
+| 1500 | 0.55976608 | 961.1462s |
+| 2000 | 0.56734583 | 1269.1585s |
+
+It was early stopped after step2000. The curve is not meaningfully ahead of the
+6-layer pooled prompt run, and it remains below the token-only prompt run at
+1500 while only matching it at 2000. Extra depth alone did not show a path
+toward 0.6.
 
 ## Interpretation
 
