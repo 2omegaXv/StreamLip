@@ -35,7 +35,7 @@ from streaminlip.fm_avsr_dataset import (
 )
 from scripts.train_fm_avsr import (
     append_residual_base_condition,
-    compose_residual_prediction,
+    compose_endpoint_prediction,
     predict_energy_condition,
     residual_base_extra_dim,
 )
@@ -543,22 +543,19 @@ def main():
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
                 )
-                if residual_base is not None:
-                    base_latent = base_latent_for_condition
-                    if base_latent is None:
-                        base_latent = residual_base.reconstruct_from_cond(
-                            v_down, h_down, spk_t,
-                            text_tokens=text_tokens,
-                            text_token_mask=text_token_mask,
-                            timbre_cond=timbre_t,
-                            audio_prompt=audio_prompt,
-                            extra_cond=None if extra_cond is None else extra_cond[..., :base_extra_dim],
-                            ctc_topk_ids=ctc_ids,
-                            ctc_topk_probs=ctc_probs,
-                        )
-                    pred_latent = compose_residual_prediction(base_latent, pred_latent_raw)
-                else:
-                    pred_latent = pred_latent_raw
+                base_latent = base_latent_for_condition
+                if residual_base is not None and base_latent is None:
+                    base_latent = residual_base.reconstruct_from_cond(
+                        v_down, h_down, spk_t,
+                        text_tokens=text_tokens,
+                        text_token_mask=text_token_mask,
+                        timbre_cond=timbre_t,
+                        audio_prompt=audio_prompt,
+                        extra_cond=None if extra_cond is None else extra_cond[..., :base_extra_dim],
+                        ctc_topk_ids=ctc_ids,
+                        ctc_topk_probs=ctc_probs,
+                    )
+                pred_latent = compose_endpoint_prediction(pred_latent_raw, base_latent)
             elif args.use_denoise:
                 gen = torch.Generator(device=device).manual_seed(args.denoise_seed + i)
                 noise = torch.randn(
@@ -567,7 +564,7 @@ def main():
                 denoise_t = torch.full(
                     (1,), args.denoise_t, device=device, dtype=torch.bfloat16
                 )
-                pred_latent = fm.denoise_from_noise(
+                pred_latent_raw = fm.denoise_from_noise(
                     v_down, h_down, spk_t, noise, denoise_t,
                     text_tokens=text_tokens,
                     text_token_mask=text_token_mask,
@@ -577,8 +574,11 @@ def main():
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
                 )
+                pred_latent = compose_endpoint_prediction(
+                    pred_latent_raw, base_latent_for_condition
+                )
             else:
-                pred_latent = fm.forward_inference(
+                pred_latent_raw = fm.forward_inference(
                     v_down, h_down, spk_t, nfe=args.nfe,
                     text_tokens=text_tokens,
                     text_token_mask=text_token_mask,
@@ -587,6 +587,9 @@ def main():
                     extra_cond=extra_cond,
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
+                )
+                pred_latent = compose_endpoint_prediction(
+                    pred_latent_raw, base_latent_for_condition
                 )
             pred_norm_np = pred_latent.squeeze(0).float().cpu().numpy()
             target_norm_np = normalize_latent(lat_gt[:T_a])

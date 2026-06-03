@@ -25,6 +25,7 @@ from scripts.train_fm_avsr import (
     explicit_cli_keys,
     residual_base_extra_dim,
     compose_residual_prediction,
+    compose_endpoint_prediction,
     masked_corr_loss,
     masked_mse_loss,
     masked_timbre_stats_loss,
@@ -501,6 +502,16 @@ class FMAVSRDatasetTest(unittest.TestCase):
         pred = compose_residual_prediction(baseline, residual)
 
         self.assertTrue(torch.equal(pred, torch.tensor([[[1.5], [1.75]]])))
+
+    def test_compose_endpoint_prediction_adds_baseline_when_residual_is_active(self):
+        import torch
+
+        raw = torch.tensor([[[0.25], [-0.5]]])
+        baseline = torch.tensor([[[1.0], [2.0]]])
+
+        pred = compose_endpoint_prediction(raw, baseline)
+
+        self.assertTrue(torch.equal(pred, torch.tensor([[[1.25], [1.5]]])))
 
     def test_predict_energy_condition_uses_residual_baseline_when_available(self):
         import torch

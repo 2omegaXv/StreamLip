@@ -399,6 +399,15 @@ def compose_residual_prediction(
     return baseline + residual
 
 
+def compose_endpoint_prediction(
+    raw_prediction: torch.Tensor,
+    baseline: torch.Tensor | None,
+) -> torch.Tensor:
+    if baseline is None:
+        return raw_prediction
+    return compose_residual_prediction(baseline, raw_prediction)
+
+
 def predict_energy_condition(
     fm,
     residual_base,
@@ -1037,23 +1046,19 @@ def main():
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
                         )
-                        if residual_base is not None:
-                            if base_recon_cond is None:
-                                with torch.no_grad():
-                                    base_recon_cond = residual_base.reconstruct_from_cond(
-                                        v_down, h_down, spk,
-                                        text_tokens=text_tokens,
-                                        text_token_mask=text_mask,
-                                        timbre_cond=timbre_cond,
-                                        audio_prompt=audio_prompt,
-                                        extra_cond=None if extra_cond is None else extra_cond[..., :base_extra_dim],
-                                        ctc_topk_ids=ctc_ids,
-                                        ctc_topk_probs=ctc_probs,
-                                    )
-                            base_recon = base_recon_cond
-                            pred_recon = compose_residual_prediction(base_recon, pred_recon_raw)
-                        else:
-                            pred_recon = pred_recon_raw
+                        if residual_base is not None and base_recon_cond is None:
+                            with torch.no_grad():
+                                base_recon_cond = residual_base.reconstruct_from_cond(
+                                    v_down, h_down, spk,
+                                    text_tokens=text_tokens,
+                                    text_token_mask=text_mask,
+                                    timbre_cond=timbre_cond,
+                                    audio_prompt=audio_prompt,
+                                    extra_cond=None if extra_cond is None else extra_cond[..., :base_extra_dim],
+                                    ctc_topk_ids=ctc_ids,
+                                    ctc_topk_probs=ctc_probs,
+                                )
+                        pred_recon = compose_endpoint_prediction(pred_recon_raw, base_recon_cond)
                         pca_target = project_latent_to_pca_target(
                             lat_gt, pca_mean, pca_components, args.recon_target_pca_dim
                         )
@@ -1102,7 +1107,7 @@ def main():
                         loss_recon_pca = loss_fm.new_zeros(())
                         loss_timbre_stats = loss_fm.new_zeros(())
                     if args.lambda_sample_recon > 0:
-                        pred_sample = fm.sample(
+                        pred_sample_raw = fm.sample(
                             v_down, h_down, spk,
                             nfe=args.sample_recon_nfe,
                             text_tokens=text_tokens,
@@ -1113,6 +1118,7 @@ def main():
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
                         )
+                        pred_sample = compose_endpoint_prediction(pred_sample_raw, base_recon_cond)
                         loss_sample_recon = masked_mse_loss(
                             pred_sample,
                             lat_gt,
@@ -1126,7 +1132,7 @@ def main():
                         denoise_t = torch.empty(
                             lat_gt.shape[0], device=lat_gt.device, dtype=torch.bfloat16
                         ).uniform_(args.denoise_t_min, args.denoise_t_max)
-                        pred_denoise = fm.denoise_from_noise(
+                        pred_denoise_raw = fm.denoise_from_noise(
                             v_down, h_down, spk, noise, denoise_t,
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
@@ -1136,6 +1142,7 @@ def main():
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
                         )
+                        pred_denoise = compose_endpoint_prediction(pred_denoise_raw, base_recon_cond)
                         loss_denoise = masked_mse_loss(
                             pred_denoise,
                             lat_gt,
@@ -1316,23 +1323,20 @@ def main():
                                 ctc_topk_ids=ctc_ids_v,
                                 ctc_topk_probs=ctc_probs_v,
                             )
-                            if residual_base is not None:
-                                if base_recon_v is None:
-                                    base_recon_v = residual_base.reconstruct_from_cond(
-                                        vd_v, hd_v, spk_v,
-                                        text_tokens=text_tokens_v,
-                                        text_token_mask=text_mask_v,
-                                        timbre_cond=timbre_v,
-                                        audio_prompt=audio_prompt_v,
-                                        extra_cond=None if extra_v is None else extra_v[..., :base_extra_dim],
-                                        ctc_topk_ids=ctc_ids_v,
-                                        ctc_topk_probs=ctc_probs_v,
-                                    )
-                                pred_recon_v = compose_residual_prediction(
-                                    base_recon_v, pred_recon_v_raw
+                            if residual_base is not None and base_recon_v is None:
+                                base_recon_v = residual_base.reconstruct_from_cond(
+                                    vd_v, hd_v, spk_v,
+                                    text_tokens=text_tokens_v,
+                                    text_token_mask=text_mask_v,
+                                    timbre_cond=timbre_v,
+                                    audio_prompt=audio_prompt_v,
+                                    extra_cond=None if extra_v is None else extra_v[..., :base_extra_dim],
+                                    ctc_topk_ids=ctc_ids_v,
+                                    ctc_topk_probs=ctc_probs_v,
                                 )
-                            else:
-                                pred_recon_v = pred_recon_v_raw
+                            pred_recon_v = compose_endpoint_prediction(
+                                pred_recon_v_raw, base_recon_v
+                            )
                             recon_metrics = aggregate_sample_metrics(
                                 pred_recon_v, lat_v, lat_v_lens,
                                 start_frame=args.metric_start_frame,
@@ -1347,7 +1351,7 @@ def main():
                                     device=lat_v.device,
                                     dtype=torch.bfloat16,
                                 )
-                                pred_denoise_v = fm.denoise_from_noise(
+                                pred_denoise_v_raw = fm.denoise_from_noise(
                                     vd_v, hd_v, spk_v, noise_v, denoise_t_v,
                                     text_tokens=text_tokens_v,
                                     text_token_mask=text_mask_v,
@@ -1357,6 +1361,9 @@ def main():
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
                                 )
+                                pred_denoise_v = compose_endpoint_prediction(
+                                    pred_denoise_v_raw, base_recon_v
+                                )
                                 denoise_metrics = aggregate_sample_metrics(
                                     pred_denoise_v, lat_v, lat_v_lens,
                                     start_frame=args.metric_start_frame,
@@ -1364,7 +1371,7 @@ def main():
                                 for k, v in denoise_metrics.items():
                                     val_denoise[k].append(v)
                             if args.eval_sample_nfe > 0:
-                                pred_v = fm.forward_inference(
+                                pred_v_raw = fm.forward_inference(
                                     vd_v, hd_v, spk_v,
                                     nfe=args.eval_sample_nfe,
                                     text_tokens=text_tokens_v,
@@ -1375,6 +1382,7 @@ def main():
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
                                 )
+                                pred_v = compose_endpoint_prediction(pred_v_raw, base_recon_v)
                                 sample_metrics = aggregate_sample_metrics(
                                     pred_v, lat_v, lat_v_lens,
                                     start_frame=args.metric_start_frame,
@@ -1432,23 +1440,20 @@ def main():
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
                         )
-                        if residual_base is not None:
-                            if base_train_recon is None:
-                                base_train_recon = residual_base.reconstruct_from_cond(
-                                    v_down, h_down, spk,
-                                    text_tokens=text_tokens,
-                                    text_token_mask=text_mask,
-                                    timbre_cond=timbre_cond,
-                                    audio_prompt=audio_prompt,
-                                    extra_cond=None if train_extra_cond is None else train_extra_cond[..., :base_extra_dim],
-                                    ctc_topk_ids=ctc_ids,
-                                    ctc_topk_probs=ctc_probs,
-                                )
-                            pred_train_recon = compose_residual_prediction(
-                                base_train_recon, pred_train_recon_raw
+                        if residual_base is not None and base_train_recon is None:
+                            base_train_recon = residual_base.reconstruct_from_cond(
+                                v_down, h_down, spk,
+                                text_tokens=text_tokens,
+                                text_token_mask=text_mask,
+                                timbre_cond=timbre_cond,
+                                audio_prompt=audio_prompt,
+                                extra_cond=None if train_extra_cond is None else train_extra_cond[..., :base_extra_dim],
+                                ctc_topk_ids=ctc_ids,
+                                ctc_topk_probs=ctc_probs,
                             )
-                        else:
-                            pred_train_recon = pred_train_recon_raw
+                        pred_train_recon = compose_endpoint_prediction(
+                            pred_train_recon_raw, base_train_recon
+                        )
                         train_recon = aggregate_sample_metrics(
                             pred_train_recon, lat_gt, lat_lens,
                             start_frame=args.metric_start_frame,
@@ -1461,7 +1466,7 @@ def main():
                                 device=lat_gt.device,
                                 dtype=torch.bfloat16,
                             )
-                            pred_train_denoise = fm.denoise_from_noise(
+                            pred_train_denoise_raw = fm.denoise_from_noise(
                                 v_down, h_down, spk, noise_train, denoise_t_train,
                                 text_tokens=text_tokens,
                                 text_token_mask=text_mask,
@@ -1471,6 +1476,9 @@ def main():
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
                             )
+                            pred_train_denoise = compose_endpoint_prediction(
+                                pred_train_denoise_raw, base_train_recon
+                            )
                             train_denoise = aggregate_sample_metrics(
                                 pred_train_denoise, lat_gt, lat_lens,
                                 start_frame=args.metric_start_frame,
@@ -1478,7 +1486,7 @@ def main():
                         else:
                             train_denoise = {"mse": 0.0, "mae": 0.0, "corr": 0.0, "rel_l2": 0.0}
                         if args.eval_sample_nfe > 0:
-                            pred_train = fm.forward_inference(
+                            pred_train_raw = fm.forward_inference(
                                 v_down, h_down, spk,
                                 nfe=args.eval_sample_nfe,
                                 text_tokens=text_tokens,
@@ -1488,6 +1496,9 @@ def main():
                                 extra_cond=train_extra_cond,
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
+                            )
+                            pred_train = compose_endpoint_prediction(
+                                pred_train_raw, base_train_recon
                             )
                             train_sample = aggregate_sample_metrics(
                                 pred_train, lat_gt, lat_lens,
