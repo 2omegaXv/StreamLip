@@ -82,4 +82,34 @@ stop when `val_recon_corr` plateaus or drops after the current best checkpoint.
 
 ## Results
 
-Pending.
+### 1k Strict Prompt-Skipped Metrics
+
+Both 1k runs used `metric_start_frame: 38`, so the first 3-second audio prompt
+segment is excluded from reported validation metrics.
+
+| Run | Best step | Best val recon corr | Elapsed at best | Final val recon corr |
+| --- | ---: | ---: | ---: | ---: |
+| 1k baseline | 500 | 0.40286663 | 355.8389s | 0.32069633 |
+| 1k timbre | 500 | 0.42360439 | 307.7510s | 0.34726166 |
+
+Initial result: timbre conditioning is positive on 1k, but small
+(`+0.02073776` corr). Both runs overfit after 500 steps, so larger-data runs
+should watch the 500/1000 step validation points closely and stop when
+`val_recon_corr` drops after the current best.
+
+### 10k Strict Prompt-Skipped Metrics
+
+The 10k timbre run was interrupted once after step 917 and resumed from
+`step_000500.pt`. The optimizer state is not restored by the current training
+script, but the schedule is fixed LR, so the main caveat is duplicated train
+rows between 501-917 in `metrics.csv`; `val_metrics.csv` remains clean.
+
+| Run | Best step | Best val recon corr | Elapsed at best | Final val recon corr |
+| --- | ---: | ---: | ---: | ---: |
+| 10k baseline | 1500 | 0.51326406 | 574.5242s | 0.50417887 |
+| 10k timbre | 1000 | 0.53949885 | 263.2073s after resume | 0.52915170 |
+
+10k result: timbre conditioning improves best validation recon corr by
+`+0.02623479` over the existing 10k baseline. It still does not reach 0.6.
+The best step is 1000; 1500 and 2000 decline, so this run should use
+`step_001000.pt` for downstream eval/listening.
