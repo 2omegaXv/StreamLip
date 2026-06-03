@@ -288,6 +288,7 @@ and lowers the continuation learning rate to `1e-4`.
 | 50k pooled prompt + GT energy eval | 4000 | 0.58030405 | 0.66907275 | 0.60281535 | diagnostic upper-bound for energy condition |
 | 50k residual from step4000 | 1000 | 0.58091919 | 0.66841430 | 0.60245221 | best verified full eval in this note |
 | 50k residual + timbre-stats loss | 1500 | 0.58105725 | 0.66844833 | 0.60244348 | `lambda_timbre_stats=0.2`, `lambda_recon_corr=0.05` |
+| 50k residual + frozen-base latent condition | 500 | 0.58072395 | 0.66876355 | 0.60250444 | residual head also receives frozen base recon latent |
 
 The 50k scale-up improved the best full eval from `0.57255184` to
 `0.58091919`. Residual timbre-stat continuation added only `+0.00013806`
@@ -297,6 +298,13 @@ meaningful path toward `0.6`.
 The GT-energy diagnostic moved the 50k base only from `0.58013729` to
 `0.58030405`. This rules out predicted log-RMS energy as the main bottleneck in
 the current best architecture.
+
+The frozen-base latent condition test added the frozen baseline reconstruction
+as an extra 512-d per-frame condition for the residual head. It reached
+`0.58072395` at step500, below the plain residual checkpoint (`0.58091919`) and
+the timbre-stats continuation (`0.58105725`). Exposing the base prediction
+directly to the residual head therefore did not unlock additional validation
+correlation.
 
 ### Prompt Calibration Diagnostics
 
@@ -355,10 +363,11 @@ simple global condition, the stronger token prompt gives a measurable but small
 additional gain, and residual refinement on top of the best prompt model gives a
 further small correction. A light corr loss, GT energy, prompt affine
 calibration, and post-prompt timbre-stat matching all add almost nothing after
-residual training. The remaining gap to 0.6 is likely not just "missing speaker
-identity"; the deterministic MSE-style latent head is still averaging over
-speaker and spectral detail that is not recoverable from the current condition
-fusion.
+residual training. Passing the frozen base reconstruction back in as a residual
+condition also fails to improve full eval. The remaining gap to 0.6 is likely
+not just "missing speaker identity"; the deterministic MSE-style latent head is
+still averaging over speaker and spectral detail that is not recoverable from
+the current condition fusion.
 
 The current best prompt is same-clip and should be treated as an upper-bound
 style diagnostic. A production-style voice control path should next test

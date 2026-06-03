@@ -166,6 +166,8 @@ def parse_args():
                    help="Optional checkpoint to resume model weights and step from.")
     p.add_argument("--residual_base_ckpt", default=None,
                    help="Frozen FMHead checkpoint used as baseline for residual latent training.")
+    p.add_argument("--residual_base_condition", action="store_true",
+                   help="Append frozen residual-base recon latents as frame-level extra condition.")
     p.add_argument("--batch_size",       type=int,   default=1024)
     p.add_argument("--lr",               type=float, default=3e-4)
     p.add_argument("--lr_schedule",      choices=["cosine", "fixed"], default="cosine")
@@ -650,6 +652,21 @@ def energy_extra_dim(mode: str) -> int:
     return 1 if mode in {"gt", "pred"} else 0
 
 
+def residual_base_extra_dim(enabled: bool, residual_base_ckpt: str | None) -> int:
+    return 512 if enabled and residual_base_ckpt else 0
+
+
+def append_residual_base_condition(
+    extra_cond: torch.Tensor | None,
+    base_latent: torch.Tensor | None,
+) -> torch.Tensor | None:
+    if base_latent is None:
+        return extra_cond
+    if extra_cond is None:
+        return base_latent
+    return torch.cat([extra_cond, base_latent.to(dtype=extra_cond.dtype)], dim=-1)
+
+
 def mode_uses_energy_supervision(mode: str) -> bool:
     return mode in {"gt", "pred"}
 
@@ -770,14 +787,18 @@ def main():
                    name=args.run_name, config=vars(args))
 
     # ── FM head (trainable) ───────────────────────────────────────────────────
+    base_extra_dim = (
+        ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
+        + energy_extra_dim(args.energy_condition_mode)
+    )
+    train_extra_dim = base_extra_dim + residual_base_extra_dim(
+        args.residual_base_condition, args.residual_base_ckpt
+    )
     fm = FMHeadAVSR(
         n_layers=args.n_dit_layers,
         use_cross_attn=args.use_cross_attn,
         use_text_token_cross_attn=args.use_text_token_cross_attn,
-        extra_cond_dim=(
-            ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
-            + energy_extra_dim(args.energy_condition_mode)
-        ),
+        extra_cond_dim=train_extra_dim,
         timbre_condition_dim=args.timbre_condition_dim,
         audio_prompt_dim=args.audio_prompt_dim,
         audio_prompt_pool_cond=args.audio_prompt_pool_cond,
@@ -800,10 +821,7 @@ def main():
             n_layers=args.n_dit_layers,
             use_cross_attn=args.use_cross_attn,
             use_text_token_cross_attn=args.use_text_token_cross_attn,
-            extra_cond_dim=(
-                ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
-                + energy_extra_dim(args.energy_condition_mode)
-            ),
+            extra_cond_dim=base_extra_dim,
             timbre_condition_dim=args.timbre_condition_dim,
             audio_prompt_dim=args.audio_prompt_dim,
             audio_prompt_pool_cond=args.audio_prompt_pool_cond,
@@ -975,6 +993,20 @@ def main():
                         extra_cond = pred_energy
                     else:
                         loss_energy = lat_gt.new_zeros(())
+                    base_recon_cond = None
+                    if args.residual_base_condition and residual_base is not None:
+                        with torch.no_grad():
+                            base_recon_cond = residual_base.reconstruct_from_cond(
+                                v_down, h_down, spk,
+                                text_tokens=text_tokens,
+                                text_token_mask=text_mask,
+                                timbre_cond=timbre_cond,
+                                audio_prompt=audio_prompt,
+                                extra_cond=extra_cond,
+                                ctc_topk_ids=ctc_ids,
+                                ctc_topk_probs=ctc_probs,
+                            )
+                        extra_cond = append_residual_base_condition(extra_cond, base_recon_cond)
                     if args.loss_fm_weight > 0:
                         loss_fm = fm.forward_train(
                             v_down, h_down, spk, lat_gt,
@@ -1006,17 +1038,19 @@ def main():
                             ctc_topk_probs=ctc_probs,
                         )
                         if residual_base is not None:
-                            with torch.no_grad():
-                                base_recon = residual_base.reconstruct_from_cond(
-                                    v_down, h_down, spk,
-                                    text_tokens=text_tokens,
-                                    text_token_mask=text_mask,
-                                    timbre_cond=timbre_cond,
-                                    audio_prompt=audio_prompt,
-                                    extra_cond=extra_cond.detach(),
-                                    ctc_topk_ids=ctc_ids,
-                                    ctc_topk_probs=ctc_probs,
-                                )
+                            if base_recon_cond is None:
+                                with torch.no_grad():
+                                    base_recon_cond = residual_base.reconstruct_from_cond(
+                                        v_down, h_down, spk,
+                                        text_tokens=text_tokens,
+                                        text_token_mask=text_mask,
+                                        timbre_cond=timbre_cond,
+                                        audio_prompt=audio_prompt,
+                                        extra_cond=None if extra_cond is None else extra_cond[..., :base_extra_dim],
+                                        ctc_topk_ids=ctc_ids,
+                                        ctc_topk_probs=ctc_probs,
+                                    )
+                            base_recon = base_recon_cond
                             pred_recon = compose_residual_prediction(base_recon, pred_recon_raw)
                         else:
                             pred_recon = pred_recon_raw
@@ -1248,6 +1282,19 @@ def main():
                                 for k, v in energy_metrics.items():
                                     val_energy[k].append(v)
                                 extra_v = pred_energy_v
+                            base_recon_v = None
+                            if args.residual_base_condition and residual_base is not None:
+                                base_recon_v = residual_base.reconstruct_from_cond(
+                                    vd_v, hd_v, spk_v,
+                                    text_tokens=text_tokens_v,
+                                    text_token_mask=text_mask_v,
+                                    timbre_cond=timbre_v,
+                                    audio_prompt=audio_prompt_v,
+                                    extra_cond=extra_v,
+                                    ctc_topk_ids=ctc_ids_v,
+                                    ctc_topk_probs=ctc_probs_v,
+                                )
+                                extra_v = append_residual_base_condition(extra_v, base_recon_v)
                             if args.loss_fm_weight > 0:
                                 total += fm.forward_train(
                                     vd_v, hd_v, spk_v, lat_v, lengths=lat_v_lens,
@@ -1270,16 +1317,17 @@ def main():
                                 ctc_topk_probs=ctc_probs_v,
                             )
                             if residual_base is not None:
-                                base_recon_v = residual_base.reconstruct_from_cond(
-                                    vd_v, hd_v, spk_v,
-                                    text_tokens=text_tokens_v,
-                                    text_token_mask=text_mask_v,
-                                    timbre_cond=timbre_v,
-                                    audio_prompt=audio_prompt_v,
-                                    extra_cond=extra_v,
-                                    ctc_topk_ids=ctc_ids_v,
-                                    ctc_topk_probs=ctc_probs_v,
-                                )
+                                if base_recon_v is None:
+                                    base_recon_v = residual_base.reconstruct_from_cond(
+                                        vd_v, hd_v, spk_v,
+                                        text_tokens=text_tokens_v,
+                                        text_token_mask=text_mask_v,
+                                        timbre_cond=timbre_v,
+                                        audio_prompt=audio_prompt_v,
+                                        extra_cond=None if extra_v is None else extra_v[..., :base_extra_dim],
+                                        ctc_topk_ids=ctc_ids_v,
+                                        ctc_topk_probs=ctc_probs_v,
+                                    )
                                 pred_recon_v = compose_residual_prediction(
                                     base_recon_v, pred_recon_v_raw
                                 )
@@ -1359,6 +1407,21 @@ def main():
                         else:
                             train_energy = {"mse": 0.0, "mae": 0.0, "corr": 0.0, "rel_l2": 0.0}
                             train_extra_cond = extra_cond
+                        base_train_recon = None
+                        if args.residual_base_condition and residual_base is not None:
+                            base_train_recon = residual_base.reconstruct_from_cond(
+                                v_down, h_down, spk,
+                                text_tokens=text_tokens,
+                                text_token_mask=text_mask,
+                                timbre_cond=timbre_cond,
+                                audio_prompt=audio_prompt,
+                                extra_cond=train_extra_cond,
+                                ctc_topk_ids=ctc_ids,
+                                ctc_topk_probs=ctc_probs,
+                            )
+                            train_extra_cond = append_residual_base_condition(
+                                train_extra_cond, base_train_recon
+                            )
                         pred_train_recon_raw = fm.reconstruct_from_cond(
                             v_down, h_down, spk,
                             text_tokens=text_tokens,
@@ -1370,16 +1433,17 @@ def main():
                             ctc_topk_probs=ctc_probs,
                         )
                         if residual_base is not None:
-                            base_train_recon = residual_base.reconstruct_from_cond(
-                                v_down, h_down, spk,
-                                text_tokens=text_tokens,
-                                text_token_mask=text_mask,
-                                timbre_cond=timbre_cond,
-                                audio_prompt=audio_prompt,
-                                extra_cond=train_extra_cond,
-                                ctc_topk_ids=ctc_ids,
-                                ctc_topk_probs=ctc_probs,
-                            )
+                            if base_train_recon is None:
+                                base_train_recon = residual_base.reconstruct_from_cond(
+                                    v_down, h_down, spk,
+                                    text_tokens=text_tokens,
+                                    text_token_mask=text_mask,
+                                    timbre_cond=timbre_cond,
+                                    audio_prompt=audio_prompt,
+                                    extra_cond=None if train_extra_cond is None else train_extra_cond[..., :base_extra_dim],
+                                    ctc_topk_ids=ctc_ids,
+                                    ctc_topk_probs=ctc_probs,
+                                )
                             pred_train_recon = compose_residual_prediction(
                                 base_train_recon, pred_train_recon_raw
                             )

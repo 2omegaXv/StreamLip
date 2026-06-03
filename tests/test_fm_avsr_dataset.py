@@ -23,6 +23,7 @@ from scripts.train_fm_avsr import (
     crop_batch_to_latent_window,
     energy_extra_dim,
     explicit_cli_keys,
+    residual_base_extra_dim,
     compose_residual_prediction,
     masked_corr_loss,
     masked_mse_loss,
@@ -777,6 +778,11 @@ class FMAVSRDatasetTest(unittest.TestCase):
 
         self.assertEqual(energy_extra_dim("pred"), 1)
         self.assertIsNone(extra)
+
+    def test_residual_base_condition_reserves_latent_extra_dim_only_for_residuals(self):
+        self.assertEqual(residual_base_extra_dim(False, None), 0)
+        self.assertEqual(residual_base_extra_dim(True, None), 0)
+        self.assertEqual(residual_base_extra_dim(True, "base.pt"), 512)
 
     def test_prepare_conditions_can_add_ctc_topk_token_condition(self):
         import torch

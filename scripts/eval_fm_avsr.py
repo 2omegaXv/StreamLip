@@ -33,7 +33,12 @@ from streaminlip.fm_avsr_dataset import (
     normalize_latent, denormalize_latent, build_word_timestamp_lm_indices, load_log_rms_energy,
     read_clip_text, smollm2_hidden_path,
 )
-from scripts.train_fm_avsr import compose_residual_prediction, predict_energy_condition
+from scripts.train_fm_avsr import (
+    append_residual_base_condition,
+    compose_residual_prediction,
+    predict_energy_condition,
+    residual_base_extra_dim,
+)
 from transformers import MimiModel
 
 
@@ -109,6 +114,8 @@ def parse_args():
     p.add_argument("--ckpt",          required=True)
     p.add_argument("--residual_base_ckpt", default=None,
                    help="Frozen FMHead checkpoint to add as baseline for residual checkpoints.")
+    p.add_argument("--residual_base_condition", action="store_true",
+                   help="Append frozen residual-base recon latents as frame-level extra condition.")
     p.add_argument("--data_root",     default="data/processed")
     p.add_argument("--mimi_path",     default="pretrained/mimi")
     p.add_argument("--smollm2_path",  default="pretrained/smollm2-360m",
@@ -200,6 +207,7 @@ def parse_args():
                        "audio_prompt_frames", "audio_prompt_dim", "audio_prompt_pool_cond",
                        "ctc_condition_mode", "auto_avsr_ckpt", "ctc_vocab_size",
                        "ctc_topk", "ctc_token_emb_dim", "energy_condition_mode",
+                       "residual_base_condition",
                        "n_dit_layers", "use_cross_attn", "use_text_token_cross_attn",
                        "metric_start_frame"}
         for k, v in cfg.items():
@@ -335,14 +343,18 @@ def main():
 
     # Load FM head
     print("Loading FMHeadAVSR...")
+    base_extra_dim = (
+        ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
+        + energy_extra_dim(args.energy_condition_mode)
+    )
+    train_extra_dim = base_extra_dim + residual_base_extra_dim(
+        args.residual_base_condition, args.residual_base_ckpt
+    )
     fm = FMHeadAVSR(
         n_layers=args.n_dit_layers,
         use_cross_attn=args.use_cross_attn,
         use_text_token_cross_attn=args.use_text_token_cross_attn,
-        extra_cond_dim=(
-            ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
-            + energy_extra_dim(args.energy_condition_mode)
-        ),
+        extra_cond_dim=train_extra_dim,
         timbre_condition_dim=args.timbre_condition_dim,
         audio_prompt_dim=args.audio_prompt_dim,
         audio_prompt_pool_cond=args.audio_prompt_pool_cond,
@@ -360,10 +372,7 @@ def main():
             n_layers=args.n_dit_layers,
             use_cross_attn=args.use_cross_attn,
             use_text_token_cross_attn=args.use_text_token_cross_attn,
-            extra_cond_dim=(
-                ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
-                + energy_extra_dim(args.energy_condition_mode)
-            ),
+            extra_cond_dim=base_extra_dim,
             timbre_condition_dim=args.timbre_condition_dim,
             audio_prompt_dim=args.audio_prompt_dim,
             audio_prompt_pool_cond=args.audio_prompt_pool_cond,
@@ -504,6 +513,21 @@ def main():
                     ctc_topk_probs=ctc_probs,
                 )
                 extra_cond = pred_energy if extra_cond is None else torch.cat([pred_energy, extra_cond], dim=-1)
+            base_latent_for_condition = None
+            if args.residual_base_condition and residual_base is not None:
+                base_latent_for_condition = residual_base.reconstruct_from_cond(
+                    v_down, h_down, spk_t,
+                    text_tokens=text_tokens,
+                    text_token_mask=text_token_mask,
+                    timbre_cond=timbre_t,
+                    audio_prompt=audio_prompt,
+                    extra_cond=extra_cond,
+                    ctc_topk_ids=ctc_ids,
+                    ctc_topk_probs=ctc_probs,
+                )
+                extra_cond = append_residual_base_condition(
+                    extra_cond, base_latent_for_condition
+                )
 
             # FM inference → denormalize
             if args.use_recon and args.use_denoise:
@@ -520,16 +544,18 @@ def main():
                     ctc_topk_probs=ctc_probs,
                 )
                 if residual_base is not None:
-                    base_latent = residual_base.reconstruct_from_cond(
-                        v_down, h_down, spk_t,
-                        text_tokens=text_tokens,
-                        text_token_mask=text_token_mask,
-                        timbre_cond=timbre_t,
-                        audio_prompt=audio_prompt,
-                        extra_cond=extra_cond,
-                        ctc_topk_ids=ctc_ids,
-                        ctc_topk_probs=ctc_probs,
-                    )
+                    base_latent = base_latent_for_condition
+                    if base_latent is None:
+                        base_latent = residual_base.reconstruct_from_cond(
+                            v_down, h_down, spk_t,
+                            text_tokens=text_tokens,
+                            text_token_mask=text_token_mask,
+                            timbre_cond=timbre_t,
+                            audio_prompt=audio_prompt,
+                            extra_cond=None if extra_cond is None else extra_cond[..., :base_extra_dim],
+                            ctc_topk_ids=ctc_ids,
+                            ctc_topk_probs=ctc_probs,
+                        )
                     pred_latent = compose_residual_prediction(base_latent, pred_latent_raw)
                 else:
                     pred_latent = pred_latent_raw
