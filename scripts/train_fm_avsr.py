@@ -111,6 +111,8 @@ def parse_args():
                    choices=["avsr", "text_json"],
                    default="avsr",
                    help="Text source for transcripts and pre-extracted SmolLM2 hidden states.")
+    p.add_argument("--visual_feature_name", default="avsr_enc.npy",
+                   help="Per-clip visual feature file, e.g. avsr_enc.npy or avsr_enc_lipavsr.npy.")
     p.add_argument("--ctc_condition_mode",
                    choices=[
                        "none",
@@ -123,6 +125,10 @@ def parse_args():
                    ],
                    default="none",
                    help="Optional Auto-AVSR CTC posterior condition from avsr_enc.")
+    p.add_argument("--energy_condition_mode",
+                   choices=["none", "gt", "pred"],
+                   default="none",
+                   help="Optional per-latent-frame log-RMS energy condition.")
     p.add_argument("--auto_avsr_ckpt",
                    default="/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/auto_avsr/vsr_trlrs2lrs3vox2avsp_base.pth",
                    help="Checkpoint containing ctc.ctc_lo weights for CTC conditioning.")
@@ -139,6 +145,8 @@ def parse_args():
                    help="Optional held-out clip list for validation.")
     p.add_argument("--resume_ckpt",      default=None,
                    help="Optional checkpoint to resume model weights and step from.")
+    p.add_argument("--residual_base_ckpt", default=None,
+                   help="Frozen FMHead checkpoint used as baseline for residual latent training.")
     p.add_argument("--batch_size",       type=int,   default=1024)
     p.add_argument("--lr",               type=float, default=3e-4)
     p.add_argument("--lr_schedule",      choices=["cosine", "fixed"], default="cosine")
@@ -165,6 +173,18 @@ def parse_args():
                    help="Auxiliary sampled endpoint reconstruction loss weight.")
     p.add_argument("--lambda_denoise",  type=float, default=0.0,
                    help="Noisy endpoint denoising loss weight.")
+    p.add_argument("--lambda_energy",  type=float, default=1.0,
+                   help="Energy prediction loss weight used when energy_condition_mode=pred.")
+    p.add_argument("--lambda_recon_corr", type=float, default=0.0,
+                   help="Auxiliary deterministic reconstruction correlation loss weight.")
+    p.add_argument("--lambda_recon_pca", type=float, default=0.0,
+                   help="Auxiliary deterministic reconstruction loss to a PCA-projected target.")
+    p.add_argument("--recon_target_pca_npz", default=None,
+                   help="Optional PCA basis npz with mean/components for low-rank recon targets.")
+    p.add_argument("--recon_target_pca_dim", type=int, default=0,
+                   help="Number of PCA components used to low-rank-project recon loss targets.")
+    p.add_argument("--recon_target_pca_mode", choices=["replace", "aux"], default="replace",
+                   help="Use PCA target as main recon target or auxiliary loss target.")
     p.add_argument("--sample_recon_nfe", type=int, default=4,
                    help="Euler steps for sampled endpoint reconstruction loss.")
     p.add_argument("--denoise_t_min",   type=float, default=0.0,
@@ -200,10 +220,12 @@ def get_lr(step, warmup, total, lr):
     return lr * 0.5 * (1.0 + math.cos(math.pi * t))
 
 
-def crop_batch_to_latent_window(enc_np, latent_np, latent_lens, crop_ta, rng=None):
+def crop_batch_to_latent_window(enc_np, latent_np, latent_lens, crop_ta, rng=None, energy_np=None):
     """Crop each sample to a fixed latent window and the aligned 2x video window."""
     if crop_ta <= 0:
-        return enc_np, latent_np, latent_lens
+        if energy_np is None:
+            return enc_np, latent_np, latent_lens
+        return enc_np, latent_np, energy_np, latent_lens
     B, max_ta = latent_np.shape[:2]
     crop_ta = min(crop_ta, max_ta)
     crop_tv = crop_ta * 2
@@ -212,6 +234,9 @@ def crop_batch_to_latent_window(enc_np, latent_np, latent_lens, crop_ta, rng=Non
 
     enc_crop = np.zeros((B, crop_tv, enc_np.shape[2]), dtype=enc_np.dtype)
     lat_crop = np.zeros((B, crop_ta, latent_np.shape[2]), dtype=latent_np.dtype)
+    energy_crop = None
+    if energy_np is not None:
+        energy_crop = np.zeros((B, crop_ta, energy_np.shape[2]), dtype=energy_np.dtype)
     crop_lens = np.zeros((B,), dtype=np.int64)
     for b in range(B):
         valid_ta = int(latent_lens[b])
@@ -226,8 +251,12 @@ def crop_batch_to_latent_window(enc_np, latent_np, latent_lens, crop_ta, rng=Non
         start_tv = start_ta * 2
         out_tv = min(out_ta * 2, max(0, enc_np.shape[1] - start_tv), crop_tv)
         lat_crop[b, :out_ta] = latent_np[b, start_ta : start_ta + out_ta]
+        if energy_crop is not None:
+            energy_crop[b, :out_ta] = energy_np[b, start_ta : start_ta + out_ta]
         if out_tv > 0:
             enc_crop[b, :out_tv] = enc_np[b, start_tv : start_tv + out_tv]
+    if energy_crop is not None:
+        return enc_crop, lat_crop, energy_crop, crop_lens
     return enc_crop, lat_crop, crop_lens
 
 
@@ -255,21 +284,89 @@ def aggregate_sample_metrics(pred: torch.Tensor, target: torch.Tensor, lengths: 
     }
 
 
+def masked_corr_loss(pred: torch.Tensor, target: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+    """Return 1 - global Pearson corr over valid latent values."""
+    lengths = lengths.to(device=pred.device, dtype=torch.long).clamp(min=1, max=pred.shape[1])
+    mask = torch.arange(pred.shape[1], device=pred.device).unsqueeze(0) < lengths.unsqueeze(1)
+    mask = mask.unsqueeze(-1).expand_as(pred)
+    pred_v = pred.float()[mask]
+    target_v = target.float()[mask]
+    pred_c = pred_v - pred_v.mean()
+    target_c = target_v - target_v.mean()
+    eps = 1e-6
+    pred_std = (pred_c.pow(2).mean() + eps).sqrt()
+    target_std = (target_c.pow(2).mean() + eps).sqrt()
+    corr = (pred_c * target_c).mean() / (pred_std * target_std)
+    return 1.0 - corr
+
+
+def project_latent_to_pca_target(
+    lat: torch.Tensor,
+    mean: torch.Tensor | None,
+    components: torch.Tensor | None,
+    dim: int,
+) -> torch.Tensor:
+    if dim <= 0 or mean is None or components is None:
+        return lat
+    comp = components[:dim].to(device=lat.device, dtype=lat.dtype)
+    mu = mean.to(device=lat.device, dtype=lat.dtype)
+    centered = lat - mu
+    coeff = torch.matmul(centered, comp.transpose(0, 1))
+    return mu + torch.matmul(coeff, comp)
+
+
+def compose_residual_prediction(
+    baseline: torch.Tensor,
+    residual: torch.Tensor,
+) -> torch.Tensor:
+    return baseline + residual
+
+
+def predict_energy_condition(
+    fm,
+    residual_base,
+    vis_down: torch.Tensor,
+    h_down: torch.Tensor,
+    spk: torch.Tensor,
+    text_tokens: torch.Tensor | None = None,
+    ctc_topk_ids: torch.Tensor | None = None,
+    ctc_topk_probs: torch.Tensor | None = None,
+) -> torch.Tensor:
+    source = residual_base if residual_base is not None else fm
+    return source.predict_extra_condition(
+        vis_down,
+        h_down,
+        spk,
+        text_tokens=text_tokens,
+        ctc_topk_ids=ctc_topk_ids,
+        ctc_topk_probs=ctc_topk_probs,
+    )
+
+
 def combine_training_losses(
     loss_fm: torch.Tensor,
     loss_recon: torch.Tensor,
     loss_sample_recon: torch.Tensor,
     loss_denoise: torch.Tensor,
+    loss_energy: torch.Tensor,
+    loss_recon_corr: torch.Tensor,
+    loss_recon_pca: torch.Tensor,
     loss_fm_weight: float,
     lambda_recon: float,
     lambda_sample_recon: float,
     lambda_denoise: float,
+    lambda_energy: float,
+    lambda_recon_corr: float,
+    lambda_recon_pca: float,
 ) -> torch.Tensor:
     return (
         loss_fm_weight * loss_fm
         + lambda_recon * loss_recon
         + lambda_sample_recon * loss_sample_recon
         + lambda_denoise * loss_denoise
+        + lambda_energy * loss_energy
+        + lambda_recon_corr * loss_recon_corr
+        + lambda_recon_pca * loss_recon_pca
     )
 
 
@@ -318,6 +415,7 @@ def prepare_conditions(
     text_perm=None,
     text_alignment_mode="uniform",
     ctc_condition_mode="none",
+    energy_condition_mode="none",
 ):
     enc = torch.from_numpy(batch["enc"]).to(device, dtype=torch.bfloat16)
     lat_gt = torch.from_numpy(batch["latent"]).to(device, dtype=torch.float32)
@@ -360,6 +458,21 @@ def prepare_conditions(
         pos = torch.arange(text_tokens.shape[1], device=device).unsqueeze(0)
         text_token_mask = pos < lens_t.unsqueeze(1)
     extra_cond = None
+    if energy_condition_mode == "gt":
+        if batch.get("energy") is None:
+            raise ValueError("energy_condition_mode=gt requires batch['energy']")
+        raw_energy = batch["energy"]
+        if isinstance(raw_energy, torch.Tensor):
+            energy = raw_energy.to(device=device, dtype=torch.bfloat16)
+        else:
+            energy = torch.from_numpy(raw_energy).to(device, dtype=torch.bfloat16)
+        extra_cond = energy[:, :T_a, :]
+        if extra_cond.shape[1] < T_a:
+            pad = torch.zeros(
+                B, T_a - extra_cond.shape[1], extra_cond.shape[2],
+                device=device, dtype=torch.bfloat16,
+            )
+            extra_cond = torch.cat([extra_cond, pad], dim=1)
     ctc_topk_ids = None
     ctc_topk_probs = None
     if ctc_condition_mode in {"logprob", "shuffle_logprob", "summary", "shuffle_summary"}:
@@ -370,13 +483,14 @@ def prepare_conditions(
             ctc = raw_ctc.to(device=device, dtype=torch.bfloat16)
         else:
             ctc = torch.from_numpy(raw_ctc).to(device, dtype=torch.bfloat16)
-        extra_cond = ctc[:, ::2, :][:, :T_a, :]
-        if extra_cond.shape[1] < T_a:
+        ctc_extra = ctc[:, ::2, :][:, :T_a, :]
+        if ctc_extra.shape[1] < T_a:
             pad = torch.zeros(
-                B, T_a - extra_cond.shape[1], extra_cond.shape[2],
+                B, T_a - ctc_extra.shape[1], ctc_extra.shape[2],
                 device=device, dtype=torch.bfloat16,
             )
-            extra_cond = torch.cat([extra_cond, pad], dim=1)
+            ctc_extra = torch.cat([ctc_extra, pad], dim=1)
+        extra_cond = ctc_extra if extra_cond is None else torch.cat([extra_cond, ctc_extra], dim=-1)
     elif ctc_condition_mode in {"topk", "shuffle_topk"}:
         if batch.get("ctc_topk_ids") is None or batch.get("ctc_topk_probs") is None:
             raise ValueError("CTC top-k condition requires ids and probs")
@@ -442,6 +556,39 @@ def ctc_topk_dim(mode: str, topk: int) -> int:
     return topk if mode in {"topk", "shuffle_topk"} else 0
 
 
+def energy_extra_dim(mode: str) -> int:
+    return 1 if mode in {"gt", "pred"} else 0
+
+
+def mode_uses_energy_supervision(mode: str) -> bool:
+    return mode in {"gt", "pred"}
+
+
+def batch_energy_tensor(batch, device, T_a: int) -> torch.Tensor:
+    if batch.get("energy") is None:
+        raise ValueError("energy supervision requires batch['energy']")
+    raw_energy = batch["energy"]
+    if isinstance(raw_energy, torch.Tensor):
+        energy = raw_energy.to(device=device, dtype=torch.bfloat16)
+    else:
+        energy = torch.from_numpy(raw_energy).to(device, dtype=torch.bfloat16)
+    energy = energy[:, :T_a, :]
+    if energy.shape[1] < T_a:
+        pad = torch.zeros(
+            energy.shape[0],
+            T_a - energy.shape[1],
+            energy.shape[2],
+            device=device,
+            dtype=energy.dtype,
+        )
+        energy = torch.cat([energy, pad], dim=1)
+    return energy
+
+
+def mean_metrics(values):
+    return {k: sum(v) / max(len(v), 1) for k, v in values.items()}
+
+
 def attach_ctc_condition(batch, ctc_head, device, mode: str, vocab_size: int, topk: int = 4):
     if ctc_head is None:
         return batch
@@ -497,7 +644,9 @@ def main():
     metrics_f = metrics_path.open("a", newline="")
     metrics = csv.DictWriter(metrics_f, fieldnames=[
         "step", "epoch", "loss_fm", "loss_recon", "loss_total", "lr",
-        "loss_sample_recon", "loss_denoise", "seconds_per_step", "elapsed_seconds"
+        "loss_sample_recon", "loss_denoise", "loss_energy", "loss_recon_corr",
+        "loss_recon_pca",
+        "seconds_per_step", "elapsed_seconds"
     ])
     if not metrics_exists:
         metrics.writeheader()
@@ -506,9 +655,11 @@ def main():
     val_metrics_f = val_metrics_path.open("a", newline="")
     val_metrics = csv.DictWriter(val_metrics_f, fieldnames=[
         "step", "epoch", "val_loss_fm",
+        "val_energy_mse", "val_energy_mae", "val_energy_corr", "val_energy_rel_l2",
         "val_sample_mse", "val_sample_mae", "val_sample_corr", "val_sample_rel_l2",
         "val_recon_mse", "val_recon_mae", "val_recon_corr", "val_recon_rel_l2",
         "val_denoise_mse", "val_denoise_mae", "val_denoise_corr", "val_denoise_rel_l2",
+        "train_energy_mse", "train_energy_mae", "train_energy_corr", "train_energy_rel_l2",
         "train_sample_mse", "train_sample_mae", "train_sample_corr", "train_sample_rel_l2",
         "train_recon_mse", "train_recon_mae", "train_recon_corr", "train_recon_rel_l2",
         "train_denoise_mse", "train_denoise_mae", "train_denoise_corr", "train_denoise_rel_l2",
@@ -533,7 +684,10 @@ def main():
         n_layers=args.n_dit_layers,
         use_cross_attn=args.use_cross_attn,
         use_text_token_cross_attn=args.use_text_token_cross_attn,
-        extra_cond_dim=ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size),
+        extra_cond_dim=(
+            ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
+            + energy_extra_dim(args.energy_condition_mode)
+        ),
         ctc_vocab_size=args.ctc_vocab_size,
         ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
         ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -547,9 +701,46 @@ def main():
     n_train = sum(p.numel() for p in fm.parameters())
     print(f"FM head: {n_train/1e6:.1f}M params (all trainable)")
 
+    residual_base = None
+    if args.residual_base_ckpt:
+        residual_base = FMHeadAVSR(
+            n_layers=args.n_dit_layers,
+            use_cross_attn=args.use_cross_attn,
+            use_text_token_cross_attn=args.use_text_token_cross_attn,
+            extra_cond_dim=(
+                ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
+                + energy_extra_dim(args.energy_condition_mode)
+            ),
+            ctc_vocab_size=args.ctc_vocab_size,
+            ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
+            ctc_token_emb_dim=args.ctc_token_emb_dim,
+        ).to(device).bfloat16().eval()
+        base_ckpt = torch.load(args.residual_base_ckpt, map_location="cpu", weights_only=False)
+        residual_base.load_state_dict(base_ckpt["fm_head"])
+        for p in residual_base.parameters():
+            p.requires_grad_(False)
+        print(f"Residual baseline: {args.residual_base_ckpt}")
+
     ctc_head = None
     if args.ctc_condition_mode != "none":
         ctc_head = load_ctc_head(args.auto_avsr_ckpt, args.ctc_vocab_size).to(device)
+    pca_mean = None
+    pca_components = None
+    if args.recon_target_pca_npz:
+        pca = np.load(args.recon_target_pca_npz)
+        pca_mean = torch.from_numpy(pca["mean"].astype("float32")).to(device)
+        pca_components = torch.from_numpy(pca["components"].astype("float32")).to(device)
+        if args.recon_target_pca_dim <= 0:
+            raise ValueError("recon_target_pca_dim must be positive when recon_target_pca_npz is set")
+        if args.recon_target_pca_dim > pca_components.shape[0]:
+            raise ValueError(
+                f"recon_target_pca_dim={args.recon_target_pca_dim} exceeds "
+                f"components={pca_components.shape[0]}"
+            )
+        print(
+            f"Recon target PCA: {args.recon_target_pca_npz} "
+            f"dim={args.recon_target_pca_dim} mode={args.recon_target_pca_mode}"
+        )
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     limit = 32 if args.debug else None
@@ -563,6 +754,8 @@ def main():
         limit=limit, clip_list=args.clip_list,
         tokenizer=tokenizer, text_alignment_mode=args.text_alignment_mode,
         text_source=args.text_source,
+        visual_feature_name=args.visual_feature_name,
+        load_energy=mode_uses_energy_supervision(args.energy_condition_mode),
     )
     if args.val_clip_list:
         train_ds = ds
@@ -571,6 +764,8 @@ def main():
             limit=limit, clip_list=args.val_clip_list,
             tokenizer=tokenizer, text_alignment_mode=args.text_alignment_mode,
             text_source=args.text_source,
+            visual_feature_name=args.visual_feature_name,
+            load_energy=mode_uses_energy_supervision(args.energy_condition_mode),
         )
         train_n = len(train_ds)
         val_n = len(val_ds)
@@ -632,9 +827,15 @@ def main():
                         args.ctc_topk,
                     )
                 if args.crop_ta > 0:
-                    batch["enc"], batch["latent"], batch["latent_lens"] = crop_batch_to_latent_window(
-                        batch["enc"], batch["latent"], batch["latent_lens"], args.crop_ta, crop_rng
-                    )
+                    if mode_uses_energy_supervision(args.energy_condition_mode):
+                        batch["enc"], batch["latent"], batch["energy"], batch["latent_lens"] = crop_batch_to_latent_window(
+                            batch["enc"], batch["latent"], batch["latent_lens"], args.crop_ta, crop_rng,
+                            energy_np=batch["energy"],
+                        )
+                    else:
+                        batch["enc"], batch["latent"], batch["latent_lens"] = crop_batch_to_latent_window(
+                            batch["enc"], batch["latent"], batch["latent_lens"], args.crop_ta, crop_rng
+                        )
                 (
                     v_down,
                     h_down,
@@ -650,10 +851,23 @@ def main():
                     batch, device, condition_mode=args.condition_mode,
                     text_alignment_mode=args.text_alignment_mode,
                     ctc_condition_mode=args.ctc_condition_mode,
+                    energy_condition_mode=args.energy_condition_mode,
                 )
 
                 # FM loss
                 with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                    if args.energy_condition_mode == "pred":
+                        energy_gt = batch_energy_tensor(batch, device, lat_gt.shape[1])
+                        pred_energy = predict_energy_condition(
+                            fm, residual_base, v_down, h_down, spk,
+                            text_tokens=text_tokens,
+                            ctc_topk_ids=ctc_ids,
+                            ctc_topk_probs=ctc_probs,
+                        )
+                        loss_energy = masked_mse_loss(pred_energy, energy_gt, lat_lens)
+                        extra_cond = pred_energy
+                    else:
+                        loss_energy = lat_gt.new_zeros(())
                     if args.loss_fm_weight > 0:
                         loss_fm = fm.forward_train(
                             v_down, h_down, spk, lat_gt,
@@ -666,8 +880,12 @@ def main():
                         )
                     else:
                         loss_fm = lat_gt.new_zeros(())
-                    if args.lambda_recon > 0:
-                        pred_recon = fm.reconstruct_from_cond(
+                    if (
+                        args.lambda_recon > 0
+                        or args.lambda_recon_corr > 0
+                        or args.lambda_recon_pca > 0
+                    ):
+                        pred_recon_raw = fm.reconstruct_from_cond(
                             v_down, h_down, spk,
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
@@ -675,9 +893,43 @@ def main():
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
                         )
-                        loss_recon = masked_mse_loss(pred_recon, lat_gt, lat_lens)
+                        if residual_base is not None:
+                            with torch.no_grad():
+                                base_recon = residual_base.reconstruct_from_cond(
+                                    v_down, h_down, spk,
+                                    text_tokens=text_tokens,
+                                    text_token_mask=text_mask,
+                                    extra_cond=extra_cond.detach(),
+                                    ctc_topk_ids=ctc_ids,
+                                    ctc_topk_probs=ctc_probs,
+                                )
+                            pred_recon = compose_residual_prediction(base_recon, pred_recon_raw)
+                        else:
+                            pred_recon = pred_recon_raw
+                        pca_target = project_latent_to_pca_target(
+                            lat_gt, pca_mean, pca_components, args.recon_target_pca_dim
+                        )
+                        lat_recon_target = (
+                            pca_target if args.recon_target_pca_mode == "replace" else lat_gt
+                        )
+                        if args.lambda_recon > 0:
+                            loss_recon = masked_mse_loss(pred_recon, lat_recon_target, lat_lens)
+                        else:
+                            loss_recon = loss_fm.new_zeros(())
+                        if args.lambda_recon_pca > 0:
+                            loss_recon_pca = masked_mse_loss(pred_recon, pca_target, lat_lens)
+                        else:
+                            loss_recon_pca = loss_fm.new_zeros(())
+                        if args.lambda_recon_corr > 0:
+                            loss_recon_corr = masked_corr_loss(
+                                pred_recon, lat_recon_target, lat_lens
+                            )
+                        else:
+                            loss_recon_corr = loss_fm.new_zeros(())
                     else:
                         loss_recon = loss_fm.new_zeros(())
+                        loss_recon_corr = loss_fm.new_zeros(())
+                        loss_recon_pca = loss_fm.new_zeros(())
                     if args.lambda_sample_recon > 0:
                         pred_sample = fm.sample(
                             v_down, h_down, spk,
@@ -712,10 +964,16 @@ def main():
                         loss_recon,
                         loss_sample_recon,
                         loss_denoise,
+                        loss_energy,
+                        loss_recon_corr,
+                        loss_recon_pca,
                         args.loss_fm_weight,
                         args.lambda_recon,
                         args.lambda_sample_recon,
                         args.lambda_denoise,
+                        args.lambda_energy,
+                        args.lambda_recon_corr,
+                        args.lambda_recon_pca,
                     )
 
                 opt.zero_grad()
@@ -736,6 +994,9 @@ def main():
                     "loss_recon": f"{loss_recon.item():.8f}",
                     "loss_sample_recon": f"{loss_sample_recon.item():.8f}",
                     "loss_denoise": f"{loss_denoise.item():.8f}",
+                    "loss_energy": f"{loss_energy.item():.8f}",
+                    "loss_recon_corr": f"{loss_recon_corr.item():.8f}",
+                    "loss_recon_pca": f"{loss_recon_pca.item():.8f}",
                     "loss_total": f"{loss.item():.8f}",
                     "lr": f"{lr:.10e}",
                     "seconds_per_step": "",
@@ -746,6 +1007,8 @@ def main():
                 last_save_recon = loss_recon.item()
                 last_save_sample_recon = loss_sample_recon.item()
                 last_save_denoise = loss_denoise.item()
+                last_save_recon_corr = loss_recon_corr.item()
+                last_save_recon_pca = loss_recon_pca.item()
                 last_save_total = loss.item()
                 last_save_lr = lr
 
@@ -754,6 +1017,9 @@ def main():
                     eta = f"{(max_steps-step)*sps/3600:.1f}h"
                     print(f"step {step:6d}/{max_steps} | fm {loss_fm.item():.4f} | "
                           f"recon {loss_recon.item():.4f} | "
+                          f"pca {loss_recon_pca.item():.4f} | "
+                          f"corr_loss {loss_recon_corr.item():.4f} | "
+                          f"energy {loss_energy.item():.4f} | "
                           f"sample {loss_sample_recon.item():.4f} | "
                           f"denoise {loss_denoise.item():.4f} | "
                           f"total {loss.item():.4f} | "
@@ -764,6 +1030,9 @@ def main():
                             "train/loss_recon": loss_recon.item(),
                             "train/loss_sample_recon": loss_sample_recon.item(),
                             "train/loss_denoise": loss_denoise.item(),
+                            "train/loss_energy": loss_energy.item(),
+                            "train/loss_recon_corr": loss_recon_corr.item(),
+                            "train/loss_recon_pca": loss_recon_pca.item(),
                             "train/loss_total": loss.item(),
                             "train/lr": lr,
                         }, step=step)
@@ -774,6 +1043,7 @@ def main():
                     val_sample = {"mse": [], "mae": [], "corr": [], "rel_l2": []}
                     val_recon = {"mse": [], "mae": [], "corr": [], "rel_l2": []}
                     val_denoise = {"mse": [], "mae": [], "corr": [], "rel_l2": []}
+                    val_energy = {"mse": [], "mae": [], "corr": [], "rel_l2": []}
                     with torch.no_grad():
                         for vb in val_loader:
                             if ctc_head is not None:
@@ -800,7 +1070,22 @@ def main():
                                 vb, device, condition_mode=args.condition_mode,
                                 text_alignment_mode=args.text_alignment_mode,
                                 ctc_condition_mode=args.ctc_condition_mode,
+                                energy_condition_mode=args.energy_condition_mode,
                             )
+                            if args.energy_condition_mode == "pred":
+                                energy_gt_v = batch_energy_tensor(vb, device, lat_v.shape[1])
+                                pred_energy_v = predict_energy_condition(
+                                    fm, residual_base, vd_v, hd_v, spk_v,
+                                    text_tokens=text_tokens_v,
+                                    ctc_topk_ids=ctc_ids_v,
+                                    ctc_topk_probs=ctc_probs_v,
+                                )
+                                energy_metrics = aggregate_sample_metrics(
+                                    pred_energy_v, energy_gt_v, lat_v_lens
+                                )
+                                for k, v in energy_metrics.items():
+                                    val_energy[k].append(v)
+                                extra_v = pred_energy_v
                             if args.loss_fm_weight > 0:
                                 total += fm.forward_train(
                                     vd_v, hd_v, spk_v, lat_v, lengths=lat_v_lens,
@@ -810,7 +1095,7 @@ def main():
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
                                 ).item()
-                            pred_recon_v = fm.reconstruct_from_cond(
+                            pred_recon_v_raw = fm.reconstruct_from_cond(
                                 vd_v, hd_v, spk_v,
                                 text_tokens=text_tokens_v,
                                 text_token_mask=text_mask_v,
@@ -818,6 +1103,20 @@ def main():
                                 ctc_topk_ids=ctc_ids_v,
                                 ctc_topk_probs=ctc_probs_v,
                             )
+                            if residual_base is not None:
+                                base_recon_v = residual_base.reconstruct_from_cond(
+                                    vd_v, hd_v, spk_v,
+                                    text_tokens=text_tokens_v,
+                                    text_token_mask=text_mask_v,
+                                    extra_cond=extra_v,
+                                    ctc_topk_ids=ctc_ids_v,
+                                    ctc_topk_probs=ctc_probs_v,
+                                )
+                                pred_recon_v = compose_residual_prediction(
+                                    base_recon_v, pred_recon_v_raw
+                                )
+                            else:
+                                pred_recon_v = pred_recon_v_raw
                             recon_metrics = aggregate_sample_metrics(pred_recon_v, lat_v, lat_v_lens)
                             for k, v in recon_metrics.items():
                                 val_recon[k].append(v)
@@ -858,24 +1157,48 @@ def main():
                             n += 1
                             if n >= 10: break
                     val_fm = total / max(n, 1) if args.loss_fm_weight > 0 else 0.0
-                    val_sample_mean = {
-                        k: sum(v) / max(len(v), 1) for k, v in val_sample.items()
-                    }
-                    val_recon_mean = {
-                        k: sum(v) / max(len(v), 1) for k, v in val_recon.items()
-                    }
-                    val_denoise_mean = {
-                        k: sum(v) / max(len(v), 1) for k, v in val_denoise.items()
-                    }
+                    val_sample_mean = mean_metrics(val_sample)
+                    val_recon_mean = mean_metrics(val_recon)
+                    val_denoise_mean = mean_metrics(val_denoise)
+                    val_energy_mean = mean_metrics(val_energy)
                     with torch.no_grad():
-                        pred_train_recon = fm.reconstruct_from_cond(
+                        if args.energy_condition_mode == "pred":
+                            train_energy_gt = batch_energy_tensor(batch, device, lat_gt.shape[1])
+                            train_pred_energy = predict_energy_condition(
+                                fm, residual_base, v_down, h_down, spk,
+                                text_tokens=text_tokens,
+                                ctc_topk_ids=ctc_ids,
+                                ctc_topk_probs=ctc_probs,
+                            )
+                            train_energy = aggregate_sample_metrics(
+                                train_pred_energy, train_energy_gt, lat_lens
+                            )
+                            train_extra_cond = train_pred_energy
+                        else:
+                            train_energy = {"mse": 0.0, "mae": 0.0, "corr": 0.0, "rel_l2": 0.0}
+                            train_extra_cond = extra_cond
+                        pred_train_recon_raw = fm.reconstruct_from_cond(
                             v_down, h_down, spk,
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
-                            extra_cond=extra_cond,
+                            extra_cond=train_extra_cond,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
                         )
+                        if residual_base is not None:
+                            base_train_recon = residual_base.reconstruct_from_cond(
+                                v_down, h_down, spk,
+                                text_tokens=text_tokens,
+                                text_token_mask=text_mask,
+                                extra_cond=train_extra_cond,
+                                ctc_topk_ids=ctc_ids,
+                                ctc_topk_probs=ctc_probs,
+                            )
+                            pred_train_recon = compose_residual_prediction(
+                                base_train_recon, pred_train_recon_raw
+                            )
+                        else:
+                            pred_train_recon = pred_train_recon_raw
                         train_recon = aggregate_sample_metrics(pred_train_recon, lat_gt, lat_lens)
                         if args.lambda_denoise > 0:
                             noise_train = torch.randn_like(lat_gt).to(dtype=torch.bfloat16)
@@ -889,7 +1212,7 @@ def main():
                                 v_down, h_down, spk, noise_train, denoise_t_train,
                                 text_tokens=text_tokens,
                                 text_token_mask=text_mask,
-                                extra_cond=extra_cond,
+                                extra_cond=train_extra_cond,
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
                             )
@@ -904,7 +1227,7 @@ def main():
                                 nfe=args.eval_sample_nfe,
                                 text_tokens=text_tokens,
                                 text_token_mask=text_mask,
-                                extra_cond=extra_cond,
+                                extra_cond=train_extra_cond,
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
                             )
@@ -914,6 +1237,7 @@ def main():
                     print(
                         f"  [val] loss_fm {val_fm:.4f} | "
                         f"sample corr {val_sample_mean['corr']:.4f} | "
+                        f"energy corr {val_energy_mean['corr']:.4f} | "
                         f"recon corr {val_recon_mean['corr']:.4f} | "
                         f"denoise corr {val_denoise_mean['corr']:.4f} | "
                         f"train denoise corr {train_denoise['corr']:.4f}",
@@ -923,6 +1247,10 @@ def main():
                         "step": step,
                         "epoch": epoch,
                         "val_loss_fm": f"{val_fm:.8f}",
+                        "val_energy_mse": f"{val_energy_mean['mse']:.8f}",
+                        "val_energy_mae": f"{val_energy_mean['mae']:.8f}",
+                        "val_energy_corr": f"{val_energy_mean['corr']:.8f}",
+                        "val_energy_rel_l2": f"{val_energy_mean['rel_l2']:.8f}",
                         "val_sample_mse": f"{val_sample_mean['mse']:.8f}",
                         "val_sample_mae": f"{val_sample_mean['mae']:.8f}",
                         "val_sample_corr": f"{val_sample_mean['corr']:.8f}",
@@ -935,6 +1263,10 @@ def main():
                         "val_denoise_mae": f"{val_denoise_mean['mae']:.8f}",
                         "val_denoise_corr": f"{val_denoise_mean['corr']:.8f}",
                         "val_denoise_rel_l2": f"{val_denoise_mean['rel_l2']:.8f}",
+                        "train_energy_mse": f"{train_energy['mse']:.8f}",
+                        "train_energy_mae": f"{train_energy['mae']:.8f}",
+                        "train_energy_corr": f"{train_energy['corr']:.8f}",
+                        "train_energy_rel_l2": f"{train_energy['rel_l2']:.8f}",
                         "train_sample_mse": f"{train_sample['mse']:.8f}",
                         "train_sample_mae": f"{train_sample['mae']:.8f}",
                         "train_sample_corr": f"{train_sample['corr']:.8f}",
@@ -963,8 +1295,12 @@ def main():
                         "loss_recon": last_save_recon,
                         "loss_sample_recon": last_save_sample_recon,
                         "loss_denoise": last_save_denoise,
+                        "loss_recon_corr": last_save_recon_corr,
+                        "loss_recon_pca": last_save_recon_pca,
+                        "loss_energy": loss_energy.item() if "loss_energy" in locals() else None,
                         "loss_total": last_save_total,
                         "lr": last_save_lr,
+                        "residual_base_ckpt": args.residual_base_ckpt,
                         "args": vars(args),
                     }, str(path))
                     print(f"  [save] {path}", flush=True)

@@ -184,6 +184,25 @@ class FMHeadTemporalConditionTest(unittest.TestCase):
             "raw text token cross-attention attended to masked padding tokens",
         )
 
+    def test_frame_cross_attention_ignores_raw_text_token_mask_shape(self):
+        torch.manual_seed(11)
+        model = FMHead(n_layers=1, use_cross_attn=True).eval()
+        vis = torch.randn(2, 5, 960)
+        h_lm = torch.randn(2, 5, 960)
+        spk = torch.randn(2, 256)
+        text_tokens = torch.randn(2, 3, 960)
+        text_mask = torch.ones(2, 3, dtype=torch.bool)
+
+        out = model.reconstruct_from_cond(
+            vis,
+            h_lm,
+            spk,
+            text_tokens=text_tokens,
+            text_token_mask=text_mask,
+        )
+
+        self.assertEqual(out.shape, (2, 5, 512))
+
     def test_extra_condition_changes_temporal_condition(self):
         torch.manual_seed(7)
         model = FMHead(n_layers=1, extra_cond_dim=4).eval()
@@ -219,6 +238,17 @@ class FMHeadTemporalConditionTest(unittest.TestCase):
         out = model.forward_inference(vis, h_lm, spk, nfe=1, extra_cond=extra)
 
         self.assertEqual(out.shape, (1, 3, 512))
+
+    def test_predict_energy_from_condition_returns_frame_level_scalar(self):
+        torch.manual_seed(10)
+        model = FMHead(n_layers=1, extra_cond_dim=1).eval()
+        vis = torch.randn(2, 3, 960)
+        h_lm = torch.zeros(2, 3, 960)
+        spk = torch.randn(2, 256)
+
+        pred = model.predict_extra_condition(vis, h_lm, spk)
+
+        self.assertEqual(pred.shape, (2, 3, 1))
 
     def test_ctc_topk_tokens_use_learned_token_embeddings(self):
         torch.manual_seed(9)

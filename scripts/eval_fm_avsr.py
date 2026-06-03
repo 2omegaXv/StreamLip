@@ -26,11 +26,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from streaminlip.v2.fm_head import FMHead as _FMBase, SinusoidalTimeEmb, DiTBlock
 from streaminlip.fm_avsr_dataset import (
     FMAVSRDataset, _MAX_TA, _MAX_L, validate_latent_frame_rate,
-    denormalize_latent, build_word_timestamp_lm_indices,
+    normalize_latent, denormalize_latent, build_word_timestamp_lm_indices, load_log_rms_energy,
+    read_clip_text, smollm2_hidden_path,
 )
+from scripts.train_fm_avsr import compose_residual_prediction, predict_energy_condition
 from transformers import MimiModel
 
 
@@ -95,6 +98,8 @@ def parse_args():
     p.add_argument("--config",        default=None,
                    help="Optional YAML config. Known eval keys are applied; train-only keys are ignored.")
     p.add_argument("--ckpt",          required=True)
+    p.add_argument("--residual_base_ckpt", default=None,
+                   help="Frozen FMHead checkpoint to add as baseline for residual checkpoints.")
     p.add_argument("--data_root",     default="data/processed")
     p.add_argument("--mimi_path",     default="pretrained/mimi")
     p.add_argument("--smollm2_path",  default="pretrained/smollm2-360m",
@@ -114,6 +119,12 @@ def parse_args():
                    choices=["uniform", "word_timestamps"],
                    default="uniform",
                    help="How to align SmolLM2 hidden states to latent frames.")
+    p.add_argument("--text_source",
+                   choices=["avsr", "text_json"],
+                   default="avsr",
+                   help="Text/SmolLM2 hidden-state source.")
+    p.add_argument("--visual_feature_name", default="avsr_enc.npy",
+                   help="Per-clip visual feature file, e.g. avsr_enc.npy or avsr_enc_lipavsr.npy.")
     p.add_argument("--ctc_condition_mode",
                    choices=[
                        "none",
@@ -126,6 +137,10 @@ def parse_args():
                    ],
                    default="none",
                    help="Optional Auto-AVSR CTC posterior condition from avsr_enc.")
+    p.add_argument("--energy_condition_mode",
+                   choices=["none", "gt", "pred"],
+                   default="none",
+                   help="Optional log-RMS energy condition: GT upper-bound or model-predicted.")
     p.add_argument("--auto_avsr_ckpt",
                    default="/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/auto_avsr/vsr_trlrs2lrs3vox2avsp_base.pth")
     p.add_argument("--ctc_vocab_size", type=int, default=5049)
@@ -146,6 +161,12 @@ def parse_args():
                    help="Time embedding used with --use_denoise.")
     p.add_argument("--denoise_seed",  type=int, default=0,
                    help="Random seed for the noisy token used with --use_denoise.")
+    p.add_argument("--condition_shift", type=int, default=0,
+                   help="Use clip i+shift as video/text/speaker condition while decoding GT clip i. 0 disables.")
+    p.add_argument("--metrics_json", default=None,
+                   help="Optional path to save per-clip normalized latent corr/MSE/MAE metrics.")
+    p.add_argument("--metrics_only", action="store_true",
+                   help="Skip Mimi loading and wav decoding; only compute latent metrics.")
     cli_keys = explicit_cli_keys()
     args = p.parse_args()
     if args.config:
@@ -153,9 +174,10 @@ def parse_args():
         with open(args.config, "r") as f:
             cfg = yaml.safe_load(f) or {}
         config_keys = {"data_root", "mimi_path", "smollm2_path", "split", "clip_list",
-                       "no_text_cond", "condition_mode", "text_alignment_mode",
+                       "no_text_cond", "condition_mode", "text_alignment_mode", "text_source",
+                       "visual_feature_name",
                        "ctc_condition_mode", "auto_avsr_ckpt", "ctc_vocab_size",
-                       "ctc_topk", "ctc_token_emb_dim",
+                       "ctc_topk", "ctc_token_emb_dim", "energy_condition_mode",
                        "n_dit_layers", "use_cross_attn", "use_text_token_cross_attn"}
         for k, v in cfg.items():
             if k in config_keys:
@@ -209,6 +231,10 @@ def ctc_topk_dim(mode: str, topk: int) -> int:
     return topk if mode in {"topk", "shuffle_topk"} else 0
 
 
+def energy_extra_dim(mode: str) -> int:
+    return 1 if mode in {"gt", "pred"} else 0
+
+
 def build_ctc_condition(enc_np, ctc_head, mode, vocab_size, T_a, device, topk=4):
     if ctc_head is None:
         return None, None, None
@@ -248,6 +274,29 @@ def build_ctc_condition(enc_np, ctc_head, mode, vocab_size, T_a, device, topk=4)
     return None, None, None
 
 
+def shifted_condition_clip(clips, index: int, shift: int):
+    if not clips:
+        raise ValueError("empty clips cannot provide condition")
+    return clips[(index + shift) % len(clips)]
+
+
+def latent_metrics(pred: np.ndarray, target: np.ndarray) -> dict:
+    pred_v = np.asarray(pred, dtype=np.float32).reshape(-1)
+    target_v = np.asarray(target, dtype=np.float32).reshape(-1)
+    if pred_v.shape != target_v.shape:
+        raise ValueError(f"latent shape mismatch: pred={pred.shape}, target={target.shape}")
+    diff = pred_v - target_v
+    pred_c = pred_v - float(pred_v.mean())
+    target_c = target_v - float(target_v.mean())
+    denom = float(np.sqrt(np.sum(pred_c * pred_c) * np.sum(target_c * target_c)))
+    corr = float(np.sum(pred_c * target_c) / denom) if denom > 0 else 0.0
+    return {
+        "corr": corr,
+        "mse": float(np.mean(diff * diff)),
+        "mae": float(np.mean(np.abs(diff))),
+    }
+
+
 def main():
     args   = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -260,7 +309,10 @@ def main():
         n_layers=args.n_dit_layers,
         use_cross_attn=args.use_cross_attn,
         use_text_token_cross_attn=args.use_text_token_cross_attn,
-        extra_cond_dim=ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size),
+        extra_cond_dim=(
+            ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
+            + energy_extra_dim(args.energy_condition_mode)
+        ),
         ctc_vocab_size=args.ctc_vocab_size,
         ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
         ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -269,9 +321,29 @@ def main():
     fm.load_state_dict(ckpt["fm_head"])
     print(f"  Loaded {args.ckpt}")
 
-    # Load Mimi
-    print("Loading Mimi decoder...")
-    mimi = MimiModel.from_pretrained(args.mimi_path, local_files_only=True).to(device).eval()
+    residual_base = None
+    if args.residual_base_ckpt:
+        residual_base = FMHeadAVSR(
+            n_layers=args.n_dit_layers,
+            use_cross_attn=args.use_cross_attn,
+            use_text_token_cross_attn=args.use_text_token_cross_attn,
+            extra_cond_dim=(
+                ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
+                + energy_extra_dim(args.energy_condition_mode)
+            ),
+            ctc_vocab_size=args.ctc_vocab_size,
+            ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
+            ctc_token_emb_dim=args.ctc_token_emb_dim,
+        ).to(device).bfloat16().eval()
+        base_ckpt = torch.load(args.residual_base_ckpt, map_location="cpu", weights_only=False)
+        residual_base.load_state_dict(base_ckpt["fm_head"])
+        print(f"  Loaded residual baseline {args.residual_base_ckpt}")
+
+    # Load Mimi only when wav output is needed.
+    mimi = None
+    if not args.metrics_only:
+        print("Loading Mimi decoder...")
+        mimi = MimiModel.from_pretrained(args.mimi_path, local_files_only=True).to(device).eval()
     tokenizer = None
     if args.text_alignment_mode == "word_timestamps":
         from transformers import AutoTokenizer
@@ -282,7 +354,10 @@ def main():
 
     # Test clips: last 2000 of pretrain by default, or an explicit clip list.
     subset = "train" if args.clip_list else "test"
-    ds = FMAVSRDataset(args.data_root, args.split, subset=subset, clip_list=args.clip_list)
+    ds = FMAVSRDataset(
+        args.data_root, args.split, subset=subset, clip_list=args.clip_list,
+        visual_feature_name=args.visual_feature_name,
+    )
     clips = ds.clips[:args.n]
     print(f"Evaluating {len(clips)} clips → {out_dir}\n")
 
@@ -295,12 +370,15 @@ def main():
             if shuffle_h_lm.shape[0] > _MAX_L:
                 shuffle_h_lm = shuffle_h_lm[:_MAX_L]
 
+    metrics_rows = []
     with torch.no_grad():
         for i, c in enumerate(clips):
-            enc = np.load(str(c / "avsr_enc.npy")).astype("float32")   # (T, 768)
+            cond_c = shifted_condition_clip(clips, i, args.condition_shift)
+            enc = np.load(str(cond_c / args.visual_feature_name)).astype("float32")   # (T, 768)
             lat_gt = np.load(str(c / "latent.npz"))["latent"].astype("float32")  # (T_a, 512)
-            lat_gt = validate_latent_frame_rate(lat_gt, enc.shape[0], c)
-            spk = np.load(str(c / "speaker_emb.npy")).astype("float32")  # (256,)
+            target_enc = np.load(str(c / args.visual_feature_name)).astype("float32")
+            lat_gt = validate_latent_frame_rate(lat_gt, target_enc.shape[0], c)
+            spk = np.load(str(cond_c / "speaker_emb.npy")).astype("float32")  # (256,)
 
             T_a = min(lat_gt.shape[0], _MAX_TA)
 
@@ -319,7 +397,7 @@ def main():
             if args.condition_mode == "video_only":
                 h_down = torch.zeros(1, T_a, 960, device=device, dtype=torch.bfloat16)
             else:
-                h_path = c / "smollm2_h.npy"
+                h_path = smollm2_hidden_path(cond_c, args.text_source)
                 if args.condition_mode == "shuffle_text" and shuffle_h_lm is not None:
                     h_down = resample_h_lm(shuffle_h_lm, T_a, device)
                     text_tokens = torch.from_numpy(shuffle_h_lm).to(
@@ -333,8 +411,8 @@ def main():
                     if h_lm.shape[0] > _MAX_L:
                         h_lm = h_lm[:_MAX_L]
                     if args.text_alignment_mode == "word_timestamps":
-                        txt = (c / "avsr_text.txt").read_text().strip()
-                        meta = json.loads((c / "text.json").read_text())
+                        txt = read_clip_text(cond_c, args.text_source)
+                        meta = json.loads((cond_c / "text.json").read_text())
                         lm_idx = build_word_timestamp_lm_indices(
                             txt, meta.get("words", []), tokenizer, T_a
                         )
@@ -355,12 +433,24 @@ def main():
             extra_cond, ctc_ids, ctc_probs = build_ctc_condition(
                 enc, ctc_head, args.ctc_condition_mode, args.ctc_vocab_size, T_a, device, args.ctc_topk
             )
+            if args.energy_condition_mode == "gt":
+                energy_np = load_log_rms_energy(cond_c, T_a).astype("float32")
+                energy = torch.from_numpy(energy_np).to(device=device, dtype=torch.bfloat16).unsqueeze(0)
+                extra_cond = energy if extra_cond is None else torch.cat([energy, extra_cond], dim=-1)
+            elif args.energy_condition_mode == "pred":
+                pred_energy = predict_energy_condition(
+                    fm, residual_base, v_down, h_down, spk_t,
+                    text_tokens=text_tokens,
+                    ctc_topk_ids=ctc_ids,
+                    ctc_topk_probs=ctc_probs,
+                )
+                extra_cond = pred_energy if extra_cond is None else torch.cat([pred_energy, extra_cond], dim=-1)
 
             # FM inference → denormalize
             if args.use_recon and args.use_denoise:
                 raise ValueError("--use_recon and --use_denoise are mutually exclusive")
             if args.use_recon:
-                pred_latent = fm.reconstruct_from_cond(
+                pred_latent_raw = fm.reconstruct_from_cond(
                     v_down, h_down, spk_t,
                     text_tokens=text_tokens,
                     text_token_mask=text_token_mask,
@@ -368,6 +458,18 @@ def main():
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
                 )
+                if residual_base is not None:
+                    base_latent = residual_base.reconstruct_from_cond(
+                        v_down, h_down, spk_t,
+                        text_tokens=text_tokens,
+                        text_token_mask=text_token_mask,
+                        extra_cond=extra_cond,
+                        ctc_topk_ids=ctc_ids,
+                        ctc_topk_probs=ctc_probs,
+                    )
+                    pred_latent = compose_residual_prediction(base_latent, pred_latent_raw)
+                else:
+                    pred_latent = pred_latent_raw
             elif args.use_denoise:
                 gen = torch.Generator(device=device).manual_seed(args.denoise_seed + i)
                 noise = torch.randn(
@@ -393,15 +495,43 @@ def main():
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
                 )
-            pred_np = denormalize_latent(pred_latent.squeeze(0).float().cpu().numpy())
-            save_wav(mimi_decode(mimi, pred_np, device), str(out_dir / f"{i:04d}_pred.wav"))
+            pred_norm_np = pred_latent.squeeze(0).float().cpu().numpy()
+            target_norm_np = normalize_latent(lat_gt[:T_a])
+            row_metrics = latent_metrics(pred_norm_np, target_norm_np)
+            metrics_rows.append({
+                "index": i,
+                "target_clip": str(c),
+                "condition_clip": str(cond_c),
+                "condition_shift": int(args.condition_shift),
+                "T_a": int(T_a),
+                **row_metrics,
+            })
 
-            if args.save_gt:
+            if not args.metrics_only:
+                pred_np = denormalize_latent(pred_norm_np)
+                save_wav(mimi_decode(mimi, pred_np, device), str(out_dir / f"{i:04d}_pred.wav"))
+
+            if args.save_gt and not args.metrics_only:
                 gt_np = mimi_decode(mimi, lat_gt[:T_a], device)
                 save_wav(gt_np, str(out_dir / f"{i:04d}_gt.wav"))
 
             txt = (c / "avsr_text.txt").read_text().strip()
-            print(f"[{i:3d}] {c.name}  T_a={T_a}  ref: {txt[:60]}")
+            suffix = "" if cond_c == c else f"  cond: {cond_c.name}"
+            print(f"[{i:3d}] {c.name}  T_a={T_a}{suffix}  ref: {txt[:60]}")
+
+    if args.metrics_json:
+        summary = {
+            "n": len(metrics_rows),
+            "condition_shift": int(args.condition_shift),
+            "mean_corr": float(np.mean([r["corr"] for r in metrics_rows])) if metrics_rows else 0.0,
+            "mean_mse": float(np.mean([r["mse"] for r in metrics_rows])) if metrics_rows else 0.0,
+            "mean_mae": float(np.mean([r["mae"] for r in metrics_rows])) if metrics_rows else 0.0,
+            "clips": metrics_rows,
+        }
+        metrics_path = Path(args.metrics_json)
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        metrics_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+        print(f"Metrics saved to {metrics_path}")
 
     print(f"\n完成，音频保存至 {out_dir}")
 

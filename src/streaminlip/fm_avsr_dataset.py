@@ -6,6 +6,7 @@ No heavy preprocessing — just numpy loads.
 import csv, json, re, difflib, numpy as np, torch
 from pathlib import Path
 from torch.utils.data import Dataset
+from scipy.io import wavfile
 
 _MAX_TA = 400  # ~32s at 12.5Hz; clips beyond this waste memory due to padding
 _MAX_L  = 256  # max SmolLM2 tokens; ~30s speech at typical speaking rate
@@ -71,6 +72,37 @@ def validate_latent_frame_rate(
             "enc_len / latent_len around 2.0 for 25Hz video and 12.5Hz Mimi."
         )
     return lat
+
+
+def compute_log_rms_energy(audio: np.ndarray, n_frames: int, eps: float = 1e-5) -> np.ndarray:
+    """Compute per-latent-frame log RMS energy from mono waveform samples."""
+    if n_frames <= 0:
+        return np.zeros((0,), dtype=np.float32)
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim == 2:
+        audio = audio.mean(axis=1)
+    edges = np.linspace(0, len(audio), n_frames + 1).round().astype(np.int64)
+    out = np.zeros((n_frames,), dtype=np.float32)
+    for i in range(n_frames):
+        start, end = int(edges[i]), int(edges[i + 1])
+        frame = audio[start:end]
+        if len(frame) == 0:
+            out[i] = np.log(eps)
+        else:
+            out[i] = np.log(float(np.sqrt(np.mean(frame * frame))) + eps)
+    return out
+
+
+def load_log_rms_energy(clip: str | Path, n_frames: int) -> np.ndarray:
+    """Load audio.wav and return (n_frames, 1) log-RMS energy."""
+    sr, wav = wavfile.read(str(Path(clip) / "audio.wav"))
+    if np.issubdtype(wav.dtype, np.integer):
+        wav = wav.astype(np.float32) / float(np.iinfo(wav.dtype).max)
+    else:
+        wav = wav.astype(np.float32)
+    if wav.ndim == 2:
+        wav = wav.mean(axis=1)
+    return compute_log_rms_energy(wav, n_frames)[:, None]
 
 
 def _norm_word(word: str) -> str:
@@ -207,6 +239,8 @@ class FMAVSRDataset(Dataset):
         tokenizer=None,
         text_alignment_mode: str = "uniform",
         text_source: str = "avsr",
+        visual_feature_name: str = "avsr_enc.npy",
+        load_energy: bool = False,
     ):
         root = Path(processed_root)
         set_norm_stats_path(root / "latent_norm_stats.npz")
@@ -241,6 +275,8 @@ class FMAVSRDataset(Dataset):
         self.tokenizer = tokenizer
         self.text_alignment_mode = text_alignment_mode
         self.text_source = text_source
+        self.visual_feature_name = visual_feature_name
+        self.load_energy = load_energy
         print(f"[FMAVSRDataset] split={split}/{subset}  clips={len(self.clips)}")
 
     def __len__(self): return len(self.clips)
@@ -249,7 +285,7 @@ class FMAVSRDataset(Dataset):
         c = self.clips[idx]
         # Return numpy arrays — workers pass them via pickle (no shm),
         # collate_fn converts to tensors in main process.
-        enc = np.load(str(c/"avsr_enc.npy")).astype("float32")  # (T, 768)
+        enc = np.load(str(c / self.visual_feature_name)).astype("float32")  # (T, 768)
         lat = np.load(str(c/"latent.npz"))["latent"].astype("float32")  # (T_a, 512)
         lat = validate_latent_frame_rate(lat, enc.shape[0], c)
         # Truncate long clips to cap batch padding overhead (p99 T_a=868, max=3390)
@@ -258,6 +294,10 @@ class FMAVSRDataset(Dataset):
             enc = enc[:_MAX_TA * 2]
         lat = normalize_latent(lat)
         spk = np.load(str(c/"speaker_emb.npy")).astype("float32")  # (256,)
+        energy = (
+            load_log_rms_energy(c, lat.shape[0]).astype("float32")
+            if self.load_energy else None
+        )
         # Pre-extracted SmolLM2 hidden states (L, 960) float16 — fast NFS load
         h_path = smollm2_hidden_path(c, self.text_source)
         h_lm = np.load(str(h_path)).astype("float32") if h_path.exists() else None
@@ -270,10 +310,13 @@ class FMAVSRDataset(Dataset):
             lm_idx = build_word_timestamp_lm_indices(
                 txt, meta.get("words", []), self.tokenizer, lat.shape[0]
             )
-        return {
+        item = {
             "enc": enc, "latent": lat, "speaker": spk, "h_lm": h_lm,
             "text": txt, "lm_idx": lm_idx,
         }
+        if energy is not None:
+            item["energy"] = energy
+        return item
 
 
 def collate_fn(batch):
@@ -285,6 +328,8 @@ def collate_fn(batch):
     latent_lens = np.array([b["latent"].shape[0] for b in batch], dtype=np.int64)
     enc    = np.zeros((B, max_T, 768),  dtype=np.float32)
     latent = np.zeros((B, max_Ta, 512), dtype=np.float32)
+    has_energy = all(b.get("energy") is not None for b in batch)
+    energy = np.zeros((B, max_Ta, 1), dtype=np.float32) if has_energy else None
     spk    = np.stack([b["speaker"] for b in batch])   # (B, 256)
     texts  = [b["text"] for b in batch]
     has_lm_idx = all(b.get("lm_idx") is not None for b in batch)
@@ -306,9 +351,14 @@ def collate_fn(batch):
         Ta = b["latent"].shape[0]
         enc[i, :T]     = b["enc"]
         latent[i, :Ta] = b["latent"]
+        if has_energy:
+            energy[i, :Ta] = b["energy"]
         if has_lm_idx:
             lm_idx[i, :Ta] = b["lm_idx"][:Ta]
-    return {"enc": enc, "latent": latent, "speaker": spk,
+    out = {"enc": enc, "latent": latent, "speaker": spk,
             "enc_lens": enc_lens, "latent_lens": latent_lens,
             "h_lm": h_lm, "lens_L": lens_L, "texts": texts,
             "lm_idx": lm_idx}
+    if has_energy:
+        out["energy"] = energy
+    return out

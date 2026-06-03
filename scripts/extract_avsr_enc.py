@@ -1,5 +1,5 @@
 """
-Pre-extract Auto-AVSR encoder features (enc_feat) for all LRS3 clips.
+Pre-extract Auto-AVSR encoder features (enc_feat) for LRS3 clips.
 
 Saves: avsr_enc.npy  (T', 768) float16 per clip.
 T' ≈ T/4 (ConformerEncoder downsamples ~4x from 25fps → ~6.25fps).
@@ -11,6 +11,8 @@ Usage:
   python scripts/extract_avsr_enc.py --split pretrain
   python scripts/extract_avsr_enc.py --split trainval
   python scripts/extract_avsr_enc.py --split test
+  python scripts/extract_avsr_enc.py --clip_list configs/eval_splits/foo.txt \
+    --input_name lip_avsr.npy --output_name avsr_enc_lipavsr.npy
 """
 import argparse, csv, sys, numpy as np, torch
 from pathlib import Path
@@ -33,7 +35,17 @@ def main():
     p.add_argument("--force",  action="store_true")
     p.add_argument("--batch_size", type=int, default=32)
     p.add_argument("--avsr_ckpt", default="pretrained/auto_avsr/vsr_trlrs2lrs3vox2avsp_base.pth")
+    p.add_argument("--data_root", default=str(DATA_ROOT))
+    p.add_argument("--clip_list", default=None,
+                   help="Optional file with clip paths relative to data_root or absolute paths.")
+    p.add_argument("--input_name", default="lip.npy",
+                   help="Per-clip visual input file, e.g. lip.npy or lip_avsr.npy.")
+    p.add_argument("--output_name", default="avsr_enc.npy",
+                   help="Per-clip output feature file; avoid overwriting old features for A/B tests.")
+    p.add_argument("--text_output_name", default="avsr_text.txt",
+                   help="CTC greedy text output file. Use a distinct name for A/B feature extraction.")
     args = p.parse_args()
+    data_root = Path(args.data_root)
 
     device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
     print(f"Loading Auto-AVSR on {device}...")
@@ -42,13 +54,26 @@ def main():
     asr.eval()
 
     clips = []
-    with open(DATA_ROOT / "manifest.csv") as f:
-        for row in csv.DictReader(f):
-            if row["split"] != args.split: continue
-            clips.append(DATA_ROOT / row["path"])
-            if args.limit and len(clips) >= args.limit: break
+    if args.clip_list:
+        for line in Path(args.clip_list).read_text().splitlines():
+            rel = line.strip()
+            if not rel or rel.startswith("#"):
+                continue
+            clip = Path(rel)
+            clips.append(clip if clip.is_absolute() else data_root / rel)
+            if args.limit and len(clips) >= args.limit:
+                break
+    else:
+        with open(data_root / "manifest.csv") as f:
+            for row in csv.DictReader(f):
+                if row["split"] != args.split: continue
+                clips.append(data_root / row["path"])
+                if args.limit and len(clips) >= args.limit: break
 
-    print(f"Split: {args.split}  |  Clips: {len(clips)}")
+    print(
+        f"Split: {args.split}  |  Clips: {len(clips)}  "
+        f"| input={args.input_name} | output={args.output_name}"
+    )
     done = skip = err = 0
     batch_clips, batch_frames = [], []
     import time
@@ -57,7 +82,7 @@ def main():
 
     def save_one(clip, enc, log_probs):
         enc_np = enc.float().cpu().clamp(-65504, 65504).half().numpy()
-        np.save(str(clip / "avsr_enc.npy"), enc_np)
+        np.save(str(clip / args.output_name), enc_np)
         ids = log_probs.argmax(-1).tolist()
         blank, prev, col = 0, 0, []
         for t in ids:
@@ -65,7 +90,7 @@ def main():
             prev = t
         pred_ids = torch.tensor(col, dtype=torch.long)
         text = asr.text_transform.post_process(pred_ids).replace("<eos>","").strip()
-        (clip / "avsr_text.txt").write_text(text)
+        (clip / args.text_output_name).write_text(text)
 
     def flush_batch():
         nonlocal done, err
@@ -92,7 +117,7 @@ def main():
 
     pbar = tqdm(clips, desc="extract_avsr")
     for clip in pbar:
-        out_path = clip / "avsr_enc.npy"
+        out_path = clip / args.output_name
         if out_path.exists() and not args.force:
             try:
                 arr = np.load(str(out_path))
@@ -102,7 +127,7 @@ def main():
                     continue
             except: pass
 
-        lip_path = clip / "lip.npy"
+        lip_path = clip / args.input_name
         if not lip_path.exists(): err += 1; continue
 
         try:

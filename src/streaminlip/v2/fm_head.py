@@ -223,6 +223,14 @@ class FMHead(nn.Module):
         self.cond_proj  = nn.Linear(COND_DIM + extra_cond_dim + ctc_cond_dim, self.DIM)  # condition → 512
         self.cond_token_proj = nn.Linear(self.DIM, self.DIM)
         self.text_token_proj = nn.Linear(960, self.DIM)
+        self.extra_pred_head = None
+        if extra_cond_dim > 0:
+            self.extra_pred_head = nn.Sequential(
+                nn.LayerNorm(self.DIM),
+                nn.Linear(self.DIM, self.DIM),
+                nn.SiLU(),
+                nn.Linear(self.DIM, extra_cond_dim),
+            )
         self.time_emb   = SinusoidalTimeEmb(self.DIM)
         self.blocks     = nn.ModuleList([
             DiTBlock(self.DIM, n_heads, use_cross_attn=use_cross_attn)
@@ -338,7 +346,39 @@ class FMHead(nn.Module):
             cond, cond_tokens = built
         else:
             cond, cond_tokens = built, None
-        return cond, cond_tokens, text_token_mask
+        cond_token_mask = text_token_mask if cond_tokens is not None else None
+        return cond, cond_tokens, cond_token_mask
+
+    def predict_extra_condition(
+        self,
+        vis_down: torch.Tensor,
+        h_down: torch.Tensor,
+        id_vec: torch.Tensor,
+        text_tokens: torch.Tensor | None = None,
+        ctc_topk_ids: torch.Tensor | None = None,
+        ctc_topk_probs: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Predict frame-level extra condition from vision/text/speaker only."""
+        if self.extra_pred_head is None:
+            raise ValueError("predict_extra_condition requires extra_cond_dim > 0")
+        dtype = next(self.parameters()).dtype
+        zeros = torch.zeros(
+            *vis_down.shape[:2],
+            self.extra_cond_dim,
+            device=vis_down.device,
+            dtype=dtype,
+        )
+        built = self._build_cond(
+            vis_down,
+            h_down,
+            id_vec,
+            text_tokens=text_tokens,
+            extra_cond=zeros,
+            ctc_topk_ids=ctc_topk_ids,
+            ctc_topk_probs=ctc_topk_probs,
+        )
+        cond = built[0] if isinstance(built, tuple) else built
+        return self.extra_pred_head(cond)
 
     def forward_train(
         self,

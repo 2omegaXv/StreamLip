@@ -4,12 +4,15 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import soundfile as sf
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from streaminlip.fm_avsr_dataset import (
     FMAVSRDataset,
     build_word_timestamp_lm_indices,
+    compute_log_rms_energy,
     read_clip_text,
     validate_latent_frame_rate,
 )
@@ -17,10 +20,15 @@ from scripts.train_fm_avsr import (
     aggregate_sample_metrics,
     combine_training_losses,
     crop_batch_to_latent_window,
+    energy_extra_dim,
     explicit_cli_keys,
+    compose_residual_prediction,
+    masked_corr_loss,
     masked_mse_loss,
     parse_args,
+    project_latent_to_pca_target,
     prepare_conditions,
+    predict_energy_condition,
 )
 
 
@@ -50,6 +58,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             np.save(clip / "speaker_emb.npy", np.ones((256,), dtype=np.float32))
             np.save(clip / "smollm2_h.npy", np.ones((1, 960), dtype=np.float16))
             np.save(clip / "smollm2_h_text_json.npy", np.full((3, 960), 2, dtype=np.float16))
+            sf.write(clip / "audio.wav", np.ones(2400, dtype=np.float32), 24000)
             clip_list = root / "clips.txt"
             clip_list.write_text("pretrain/spk/00001\n")
 
@@ -63,6 +72,71 @@ class FMAVSRDatasetTest(unittest.TestCase):
             self.assertEqual(item["text"], "GOOD TEXT")
             self.assertEqual(item["h_lm"].shape[0], 3)
             self.assertAlmostEqual(float(item["h_lm"][0, 0]), 2.0)
+
+    def test_dataset_can_load_custom_visual_feature_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clip = root / "pretrain" / "spk" / "00001"
+            clip.mkdir(parents=True)
+            (clip / "avsr_text.txt").write_text("CUSTOM VISUAL\n")
+            np.save(clip / "avsr_enc_lipavsr.npy", np.full((4, 768), 3, dtype=np.float32))
+            np.savez(clip / "latent.npz", latent=np.ones((2, 512), dtype=np.float32))
+            np.save(clip / "speaker_emb.npy", np.ones((256,), dtype=np.float32))
+            np.save(clip / "smollm2_h.npy", np.ones((1, 960), dtype=np.float16))
+            clip_list = root / "clips.txt"
+            clip_list.write_text("pretrain/spk/00001\n")
+
+            ds = FMAVSRDataset(
+                str(root),
+                clip_list=str(clip_list),
+                visual_feature_name="avsr_enc_lipavsr.npy",
+            )
+            item = ds[0]
+
+            self.assertEqual(item["enc"].shape, (4, 768))
+            self.assertAlmostEqual(float(item["enc"][0, 0]), 3.0)
+
+    def test_dataset_loads_log_rms_energy_aligned_to_latent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clip = root / "pretrain" / "spk" / "00001"
+            clip.mkdir(parents=True)
+            (clip / "avsr_text.txt").write_text("ENERGY\n")
+            np.save(clip / "avsr_enc.npy", np.ones((4, 768), dtype=np.float32))
+            np.savez(clip / "latent.npz", latent=np.ones((2, 512), dtype=np.float32))
+            np.save(clip / "speaker_emb.npy", np.ones((256,), dtype=np.float32))
+            np.save(clip / "smollm2_h.npy", np.ones((1, 960), dtype=np.float16))
+            sf.write(clip / "audio.wav", np.ones(2400, dtype=np.float32), 24000)
+            clip_list = root / "clips.txt"
+            clip_list.write_text("pretrain/spk/00001\n")
+
+            ds = FMAVSRDataset(str(root), clip_list=str(clip_list), load_energy=True)
+            item = ds[0]
+
+            self.assertEqual(item["energy"].shape, (2, 1))
+            np.testing.assert_allclose(
+                item["energy"][:, 0],
+                compute_log_rms_energy(np.ones(2400, dtype=np.float32), 2),
+                atol=1e-6,
+            )
+
+    def test_dataset_default_does_not_require_audio_wav(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clip = root / "pretrain" / "spk" / "00001"
+            clip.mkdir(parents=True)
+            (clip / "avsr_text.txt").write_text("NO ENERGY\n")
+            np.save(clip / "avsr_enc.npy", np.ones((4, 768), dtype=np.float32))
+            np.savez(clip / "latent.npz", latent=np.ones((2, 512), dtype=np.float32))
+            np.save(clip / "speaker_emb.npy", np.ones((256,), dtype=np.float32))
+            np.save(clip / "smollm2_h.npy", np.ones((1, 960), dtype=np.float16))
+            clip_list = root / "clips.txt"
+            clip_list.write_text("pretrain/spk/00001\n")
+
+            ds = FMAVSRDataset(str(root), clip_list=str(clip_list))
+            item = ds[0]
+
+            self.assertNotIn("energy", item)
 
     def test_reject_25hz_latent(self):
         lat = np.arange(10 * 2, dtype=np.float32).reshape(10, 2)
@@ -97,6 +171,21 @@ class FMAVSRDatasetTest(unittest.TestCase):
                 enc[b, start * 2 : start * 2 + 8, 0],
             )
 
+    def test_crop_batch_to_latent_window_keeps_energy_aligned(self):
+        rng = np.random.default_rng(0)
+        enc = np.arange(1 * 20 * 1, dtype=np.float32).reshape(1, 20, 1)
+        latent = np.arange(1 * 10 * 1, dtype=np.float32).reshape(1, 10, 1)
+        energy = np.arange(1 * 10 * 1, dtype=np.float32).reshape(1, 10, 1) + 100
+        lengths = np.array([10], dtype=np.int64)
+
+        _, latent_crop, energy_crop, crop_lengths = crop_batch_to_latent_window(
+            enc, latent, lengths, crop_ta=4, rng=rng, energy_np=energy
+        )
+
+        start = int(latent_crop[0, 0, 0])
+        np.testing.assert_array_equal(energy_crop[0, :, 0], energy[0, start:start + 4, 0])
+        np.testing.assert_array_equal(crop_lengths, np.array([4]))
+
     def test_masked_mse_loss_ignores_padded_latent_frames(self):
         import torch
 
@@ -107,6 +196,61 @@ class FMAVSRDatasetTest(unittest.TestCase):
         loss = masked_mse_loss(pred, target, lengths)
 
         self.assertAlmostEqual(loss.item(), 1.0)
+
+    def test_masked_corr_loss_is_zero_for_perfect_valid_frames(self):
+        import torch
+
+        pred = torch.tensor([[[1.0], [2.0], [100.0]]])
+        target = torch.tensor([[[1.0], [2.0], [-100.0]]])
+        lengths = torch.tensor([2])
+
+        loss = masked_corr_loss(pred, target, lengths)
+
+        self.assertAlmostEqual(loss.item(), 0.0, places=5)
+
+    def test_masked_corr_loss_penalizes_anti_correlation(self):
+        import torch
+
+        pred = torch.tensor([[[1.0], [2.0], [3.0]]])
+        target = torch.tensor([[[3.0], [2.0], [1.0]]])
+        lengths = torch.tensor([3])
+
+        loss = masked_corr_loss(pred, target, lengths)
+
+        self.assertAlmostEqual(loss.item(), 2.0, places=5)
+
+    def test_masked_corr_loss_has_finite_grad_for_constant_prediction(self):
+        import torch
+
+        pred = torch.zeros(1, 3, 1, requires_grad=True)
+        target = torch.tensor([[[1.0], [2.0], [3.0]]])
+        lengths = torch.tensor([3])
+
+        loss = masked_corr_loss(pred, target, lengths)
+        loss.backward()
+
+        self.assertTrue(torch.isfinite(loss))
+        self.assertTrue(torch.isfinite(pred.grad).all())
+
+    def test_project_latent_to_pca_target_can_disable_projection(self):
+        import torch
+
+        lat = torch.randn(2, 3, 4)
+
+        out = project_latent_to_pca_target(lat, None, None, 0)
+
+        self.assertIs(out, lat)
+
+    def test_project_latent_to_pca_target_reconstructs_low_rank_latent(self):
+        import torch
+
+        lat = torch.tensor([[[3.0, 4.0]]])
+        mean = torch.tensor([[1.0, 1.0]])
+        components = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+
+        out = project_latent_to_pca_target(lat, mean, components, 1)
+
+        self.assertTrue(torch.equal(out, torch.tensor([[[3.0, 1.0]]])))
 
     def test_aggregate_sample_metrics_ignores_padding(self):
         import torch
@@ -128,13 +272,115 @@ class FMAVSRDatasetTest(unittest.TestCase):
             loss_recon=torch.tensor(2.0),
             loss_sample_recon=torch.tensor(3.0),
             loss_denoise=torch.tensor(5.0),
+            loss_energy=torch.tensor(7.0),
+            loss_recon_corr=torch.tensor(11.0),
+            loss_recon_pca=torch.tensor(13.0),
             loss_fm_weight=0.0,
             lambda_recon=1.0,
             lambda_sample_recon=0.5,
             lambda_denoise=0.25,
+            lambda_energy=0.0,
+            lambda_recon_corr=0.0,
+            lambda_recon_pca=0.0,
         )
 
         self.assertAlmostEqual(loss.item(), 4.75)
+
+    def test_combine_training_losses_can_include_recon_corr_loss(self):
+        import torch
+
+        loss = combine_training_losses(
+            loss_fm=torch.tensor(0.0),
+            loss_recon=torch.tensor(2.0),
+            loss_sample_recon=torch.tensor(0.0),
+            loss_denoise=torch.tensor(0.0),
+            loss_energy=torch.tensor(0.0),
+            loss_recon_corr=torch.tensor(3.0),
+            loss_recon_pca=torch.tensor(7.0),
+            loss_fm_weight=0.0,
+            lambda_recon=1.0,
+            lambda_sample_recon=0.0,
+            lambda_denoise=0.0,
+            lambda_energy=0.0,
+            lambda_recon_corr=0.5,
+            lambda_recon_pca=0.0,
+        )
+
+        self.assertAlmostEqual(loss.item(), 3.5)
+
+    def test_combine_training_losses_can_include_pca_recon_loss(self):
+        import torch
+
+        loss = combine_training_losses(
+            loss_fm=torch.tensor(0.0),
+            loss_recon=torch.tensor(2.0),
+            loss_sample_recon=torch.tensor(0.0),
+            loss_denoise=torch.tensor(0.0),
+            loss_energy=torch.tensor(0.0),
+            loss_recon_corr=torch.tensor(0.0),
+            loss_recon_pca=torch.tensor(3.0),
+            loss_fm_weight=0.0,
+            lambda_recon=1.0,
+            lambda_sample_recon=0.0,
+            lambda_denoise=0.0,
+            lambda_energy=0.0,
+            lambda_recon_corr=0.0,
+            lambda_recon_pca=0.25,
+        )
+
+        self.assertAlmostEqual(loss.item(), 2.75)
+
+    def test_combine_training_losses_can_include_energy_loss(self):
+        import torch
+
+        loss = combine_training_losses(
+            loss_fm=torch.tensor(0.0),
+            loss_recon=torch.tensor(0.0),
+            loss_sample_recon=torch.tensor(0.0),
+            loss_denoise=torch.tensor(0.0),
+            loss_energy=torch.tensor(2.0),
+            loss_recon_corr=torch.tensor(3.0),
+            loss_recon_pca=torch.tensor(5.0),
+            loss_fm_weight=0.0,
+            lambda_recon=0.0,
+            lambda_sample_recon=0.0,
+            lambda_denoise=0.0,
+            lambda_energy=0.5,
+            lambda_recon_corr=0.0,
+            lambda_recon_pca=0.0,
+        )
+
+        self.assertAlmostEqual(loss.item(), 1.0)
+
+    def test_compose_residual_prediction_adds_baseline_and_residual(self):
+        import torch
+
+        baseline = torch.tensor([[[1.0], [2.0]]])
+        residual = torch.tensor([[[0.5], [-0.25]]])
+
+        pred = compose_residual_prediction(baseline, residual)
+
+        self.assertTrue(torch.equal(pred, torch.tensor([[[1.5], [1.75]]])))
+
+    def test_predict_energy_condition_uses_residual_baseline_when_available(self):
+        import torch
+
+        class FakeModel:
+            def __init__(self, value):
+                self.value = value
+
+            def predict_extra_condition(self, *args, **kwargs):
+                return torch.full((1, 2, 1), self.value)
+
+        pred = predict_energy_condition(
+            fm=FakeModel(1.0),
+            residual_base=FakeModel(2.0),
+            vis_down=torch.zeros(1, 2, 768),
+            h_down=torch.zeros(1, 2, 960),
+            spk=torch.zeros(1, 256),
+        )
+
+        self.assertTrue(torch.equal(pred, torch.full((1, 2, 1), 2.0)))
 
     def test_explicit_cli_keys_maps_flags_to_arg_names(self):
         keys = explicit_cli_keys([
@@ -311,6 +557,52 @@ class FMAVSRDatasetTest(unittest.TestCase):
         self.assertIsNone(ctc_probs)
         self.assertTrue(torch.allclose(extra[0, 0].float(), torch.tensor([0., 1., 2., 3.])))
         self.assertTrue(torch.allclose(extra[0, 1].float(), torch.tensor([8., 9., 10., 11.])))
+
+    def test_prepare_conditions_can_use_gt_energy_extra_condition(self):
+        import torch
+
+        batch = {
+            "enc": np.ones((1, 6, 768), dtype=np.float32),
+            "latent": np.zeros((1, 3, 512), dtype=np.float32),
+            "latent_lens": np.array([3], dtype=np.int64),
+            "speaker": np.ones((1, 256), dtype=np.float32),
+            "h_lm": None,
+            "lens_L": None,
+            "energy": np.array([[[1.0], [2.0], [3.0]]], dtype=np.float32),
+        }
+
+        *_, extra, ctc_ids, ctc_probs = prepare_conditions(
+            batch,
+            "cpu",
+            condition_mode="video_only",
+            energy_condition_mode="gt",
+        )
+
+        self.assertEqual(tuple(extra.shape), (1, 3, 1))
+        self.assertIsNone(ctc_ids)
+        self.assertIsNone(ctc_probs)
+        self.assertTrue(torch.allclose(extra[0, :, 0].float(), torch.tensor([1.0, 2.0, 3.0])))
+
+    def test_predicted_energy_mode_reserves_extra_dim_without_leaking_gt_energy(self):
+        batch = {
+            "enc": np.ones((1, 6, 768), dtype=np.float32),
+            "latent": np.zeros((1, 3, 512), dtype=np.float32),
+            "latent_lens": np.array([3], dtype=np.int64),
+            "speaker": np.ones((1, 256), dtype=np.float32),
+            "h_lm": None,
+            "lens_L": None,
+            "energy": np.array([[[1.0], [2.0], [3.0]]], dtype=np.float32),
+        }
+
+        *_, extra, _, _ = prepare_conditions(
+            batch,
+            "cpu",
+            condition_mode="video_only",
+            energy_condition_mode="pred",
+        )
+
+        self.assertEqual(energy_extra_dim("pred"), 1)
+        self.assertIsNone(extra)
 
     def test_prepare_conditions_can_add_ctc_topk_token_condition(self):
         import torch
