@@ -91,15 +91,17 @@ stopping in mind.
 | 30k mean/std + audio prompt tokens | 2500 | 0.56893905 | 0.68224197 | 0.61025584 | full 1k eval |
 | 30k mean/std + audio prompt tokens | 3000 | 0.56967886 | 0.68265299 | 0.60941165 | full 1k eval, 2500-step continuation |
 | 30k mean/std + audio prompt tokens + pooled prompt cond | 2500 | 0.56971665 | 0.68110923 | 0.61001512 | full 1k eval |
+| 30k pooled prompt residual from step2500 | 1500 | 0.57236865 | 0.67809615 | 0.60854835 | full 1k eval; frozen pooled prompt baseline |
 | 30k audio prompt tokens + loss start 38 | 1000 | n/a | n/a | n/a | early stopped; training-val corr 0.54083031 |
 | 30k pooled prompt, 8 DiT layers | 2000 | n/a | n/a | n/a | early stopped; training-val corr 0.56734583 |
 | 30k audio prompt tokens, shifted condition | 2500 | 0.00798798 | 1.28502175 | 0.87642337 | full 1k negative control, `condition_shift=1` |
 
-The best verified full-eval result is `0.56971665` from the pooled audio prompt
-model. This is:
+The best verified full-eval result is `0.57236865` from the residual refinement
+on top of the pooled audio prompt model. This is:
 
-- +0.03673331 over the strict 30k no-timbre baseline
-- +0.00642775 over the 30k mean/std timbre model
+- +0.03938532 over the strict 30k no-timbre baseline
+- +0.00907976 over the 30k mean/std timbre model
+- +0.00265201 over the pooled audio prompt model
 - still below the target `0.6`
 
 The shifted-condition negative control drops to approximately zero correlation,
@@ -183,11 +185,37 @@ It was early stopped after step2000. The curve is not meaningfully ahead of the
 1500 while only matching it at 2000. Extra depth alone did not show a path
 toward 0.6.
 
+### Residual Refinement From Pooled Audio Prompt
+
+Run:
+`runs/fm_avsr/lipavsr_30000_timbre3s_audioprompt38_pool_residual_from2500_recon_textjson_wordts_v1`
+
+This variant freezes
+`runs/fm_avsr/lipavsr_30000_timbre3s_audioprompt38_pool_recon_textjson_wordts_v1/step_002500.pt`
+as a baseline and trains a second 6-layer head to predict an additive residual:
+`pred = baseline + residual`. It keeps the same timbre mean/std condition,
+38-frame audio prompt tokens, and pooled prompt condition. `lambda_energy` is
+set to zero because the energy condition comes from the frozen baseline in this
+mode.
+
+| Step | Val recon corr | Elapsed |
+| ---: | ---: | ---: |
+| 500 | 0.57307028 | 340.2173s |
+| 1000 | 0.57356842 | 678.2311s |
+| 1500 | 0.57384256 | 988.4774s |
+
+Full 1k eval at step1500 is `0.57236865`, with MSE `0.67809615` and MAE
+`0.60854835`. Residual refinement gives the current best full-eval score and
+improves the previous best by `+0.00265201`, but the curve is nearly saturated
+by step1500. This is a useful correction layer, not enough by itself to close
+the remaining gap to 0.6.
+
 ## Interpretation
 
 Manual timbre control is practical in this codebase. The mean/std prompt is a
-simple global condition and the stronger token prompt gives a measurable but
-small additional gain. The remaining gap to 0.6 is likely not just "missing
+simple global condition, the stronger token prompt gives a measurable but small
+additional gain, and residual refinement on top of the best prompt model gives a
+further small correction. The remaining gap to 0.6 is likely not just "missing
 speaker identity"; the model is still bottlenecked by the visual/text-to-Mimi
 latent prediction problem and by how strongly the decoder can use a short
 reference prompt.
