@@ -230,25 +230,54 @@ Full 1k eval at step2500 is `0.57255184`, with MSE `0.67793650` and MAE
 `0.60844724`. This is only `+0.00018318` over the residual step1500 full eval,
 so corr loss is directionally positive but effectively saturated in this setup.
 
-### Lip-AVSR Data Availability
+### Lip-AVSR Data Availability and 50k Scale-Up
 
-The processed dataset currently has more visual inputs than encoded training
-features:
+Before the data scale-up, the encoded `avsr_enc_lipavsr.npy` pool was the main
+bottleneck:
 
-- `lip_avsr.npy`: 86,696 clips
 - `avsr_enc_lipavsr.npy`: 32,238 clips
-- current val1000 all have `avsr_enc_lipavsr.npy`
+- current val1000 all had `avsr_enc_lipavsr.npy`
 - trainable `avsr_enc_lipavsr.npy` after excluding current val1000: 31,238 clips
-- current 30k split already covers all but 1,238 of those trainable encoded clips
-- `lip_avsr.npy` clips still missing `avsr_enc_lipavsr.npy`: 54,458 clips
+- current 30k split already covered all but 1,238 of those trainable encoded clips
 
-A naive 65k split built from older length filters is not usable for lip-AVSR
-training because most entries lack `avsr_enc_lipavsr.npy`. The data-scale route
-therefore requires first running `scripts/extract_avsr_enc.py` with
-`--input_name lip_avsr.npy --output_name avsr_enc_lipavsr.npy` for the missing
-clips, then training on the larger encoded split. Training only the current
-31.2k encoded clips is unlikely to change the result materially compared with
-the existing 30k runs.
+A naive larger split built from older length filters was not usable for
+lip-AVSR training because many entries lacked `avsr_enc_lipavsr.npy` and some
+also lacked text hidden states or timbre conditions. The scale-up therefore used
+a ready-candidate filter before running the Auto-AVSR encoder.
+
+New 20k increment:
+
+- split: `configs/eval_splits/pretrain_lipavsr_missing_avsr_enc_ready_train20000_excl_val1000_seed43.txt`
+- candidate requirements before encoding: `lip_avsr.npy`, `latent.npz`,
+  `speaker_emb.npy`, `smollm2_h_text_json.npy`, `audio.wav`, `text.json`
+- val overlap: 0
+- old 30k overlap: 0
+- duplicates: 0
+- `timbre_cond.npy`: generated for all 20,000 clips
+- `avsr_enc_lipavsr.npy`: generated for all 20,000 clips
+- Auto-AVSR encode result: `Done: 20000  Skipped: 0  Errors: 0`
+- encode time: about 0.4h
+
+Combined 50k split:
+
+- split: `configs/eval_splits/pretrain_lipavsr_train50000_seed44_plus_ready_missing20000_excl_val1000_seed43.txt`
+- train clips: 50,000 unique
+- val clips: 1,000 unique
+- train/val overlap: 0
+
+Sample checks on the new increment showed expected file shapes, e.g.
+`lip_avsr.npy` at 25Hz, `avsr_enc_lipavsr.npy` as `(T, 768)` float16,
+`latent.npz` as about `(T/2, 512)` float16, and `timbre_cond.npy` as `(1024,)`
+float16. A debug smoke run of the 50k continuation config resumed the 30k pooled
+prompt checkpoint at step2500 and completed step2501 successfully with debug
+val recon corr `0.5694`.
+
+The 50k continuation config is
+`configs/fm_avsr_lipavsr_50000_timbre3s_audioprompt38_pool_from2500_recon_textjson_wordts.yaml`.
+It resumes
+`runs/fm_avsr/lipavsr_30000_timbre3s_audioprompt38_pool_recon_textjson_wordts_v1/step_002500.pt`,
+uses the same timbre and audio prompt conditioning, switches to the 50k split,
+and lowers the continuation learning rate to `1e-4`.
 
 ## Interpretation
 
