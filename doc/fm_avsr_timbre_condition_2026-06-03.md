@@ -279,7 +279,27 @@ It resumes
 uses the same timbre and audio prompt conditioning, switches to the 50k split,
 and lowers the continuation learning rate to `1e-4`.
 
-### 50k Continuation Results
+Remaining ready-candidate scale-up:
+
+- split: `configs/eval_splits/pretrain_lipavsr_remaining9144_excl_train50_val1000_seed43.txt`
+- candidates: 9,144 clips not in the 50k train split and not in val1000
+- all had `lip_avsr.npy`, `latent.npz`, `speaker_emb.npy`,
+  `smollm2_h_text_json.npy`, `audio.wav`, and `text.json`
+- `timbre_cond.npy`: generated for all 9,144 clips
+- `avsr_enc_lipavsr.npy`: generated for all 9,144 clips
+- Auto-AVSR encode result: `Done: 9144  Skipped: 0  Errors: 0`
+- encode time: about 0.2h
+
+Combined 59,144 split:
+
+- split: `configs/eval_splits/pretrain_lipavsr_train59144_seed44_plus_ready_remaining9144_excl_val1000_seed43.txt`
+- train clips: 59,144 unique
+- val clips: 1,000 unique
+- train/val overlap: 0
+- sample checks showed `avsr_enc_lipavsr.npy` as `(T, 768)` and
+  `timbre_cond.npy` as `(1024,)`
+
+### 50k/59k Continuation Results
 
 | Run | Step | Eval corr | Eval MSE | Eval MAE | Notes |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -289,11 +309,18 @@ and lowers the continuation learning rate to `1e-4`.
 | 50k residual from step4000 | 1000 | 0.58091919 | 0.66841430 | 0.60245221 | best verified full eval in this note |
 | 50k residual + timbre-stats loss | 1500 | 0.58105725 | 0.66844833 | 0.60244348 | `lambda_timbre_stats=0.2`, `lambda_recon_corr=0.05` |
 | 50k residual + frozen-base latent condition | 500 | 0.58072395 | 0.66876355 | 0.60250444 | residual head also receives frozen base recon latent |
+| 59k pooled prompt continuation | 5000 | 0.58143902 | 0.66799185 | 0.60200530 | resumed 50k base step4000, lr `5e-5` |
+| 59k residual from step5000 | 1000 | 0.58167589 | 0.66776208 | 0.60182909 | best verified full eval in this note |
 
 The 50k scale-up improved the best full eval from `0.57255184` to
 `0.58091919`. Residual timbre-stat continuation added only `+0.00013806`
 over the 50k residual checkpoint and slightly worsened MSE, so it is not a
 meaningful path toward `0.6`.
+
+The 59k scale-up is directionally positive but still small. It improved the
+base full eval from `0.58013729` to `0.58143902`, and residual refinement on
+that base reached `0.58167589`. This is the current best full-val metric, but
+it is still far below the target `0.6`.
 
 The GT-energy diagnostic moved the 50k base only from `0.58013729` to
 `0.58030405`. This rules out predicted log-RMS energy as the main bottleneck in
@@ -364,10 +391,12 @@ additional gain, and residual refinement on top of the best prompt model gives a
 further small correction. A light corr loss, GT energy, prompt affine
 calibration, and post-prompt timbre-stat matching all add almost nothing after
 residual training. Passing the frozen base reconstruction back in as a residual
-condition also fails to improve full eval. The remaining gap to 0.6 is likely
-not just "missing speaker identity"; the deterministic MSE-style latent head is
-still averaging over speaker and spectral detail that is not recoverable from
-the current condition fusion.
+condition also fails to improve full eval. Adding the remaining 9,144 ready
+lip-AVSR clips is the strongest positive move in the latest batch, but it only
+raises full eval to `0.58167589`. The remaining gap to 0.6 is likely not just
+"missing speaker identity"; the deterministic MSE-style latent head is still
+averaging over speaker and spectral detail that is not recoverable from the
+current condition fusion.
 
 The current best prompt is same-clip and should be treated as an upper-bound
 style diagnostic. A production-style voice control path should next test
