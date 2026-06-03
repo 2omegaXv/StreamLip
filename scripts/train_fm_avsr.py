@@ -164,6 +164,8 @@ def parse_args():
                    help="Optional held-out clip list for validation.")
     p.add_argument("--resume_ckpt",      default=None,
                    help="Optional checkpoint to resume model weights and step from.")
+    p.add_argument("--allow_partial_resume", action="store_true",
+                   help="Allow loading compatible checkpoint tensors when new condition dims are added.")
     p.add_argument("--residual_base_ckpt", default=None,
                    help="Frozen FMHead checkpoint used as baseline for residual latent training.")
     p.add_argument("--residual_base_condition", action="store_true",
@@ -390,6 +392,46 @@ def project_latent_to_pca_target(
     centered = lat - mu
     coeff = torch.matmul(centered, comp.transpose(0, 1))
     return mu + torch.matmul(coeff, comp)
+
+
+def load_fm_head_state(
+    module: nn.Module,
+    checkpoint_state: dict[str, torch.Tensor],
+    allow_partial: bool = False,
+) -> dict[str, list[str]]:
+    """Load an FM head, optionally copying matching slices for expanded Linear inputs."""
+    if not allow_partial:
+        module.load_state_dict(checkpoint_state)
+        return {"loaded": sorted(checkpoint_state), "partial": [], "skipped": []}
+
+    current = module.state_dict()
+    adapted = dict(current)
+    loaded: list[str] = []
+    partial: list[str] = []
+    skipped: list[str] = []
+    for name, old_value in checkpoint_state.items():
+        if name not in current:
+            skipped.append(name)
+            continue
+        new_value = current[name]
+        if old_value.shape == new_value.shape:
+            adapted[name] = old_value.to(dtype=new_value.dtype)
+            loaded.append(name)
+            continue
+        if (
+            old_value.ndim == new_value.ndim
+            and old_value.shape[0] == new_value.shape[0]
+            and all(o <= n for o, n in zip(old_value.shape[1:], new_value.shape[1:]))
+        ):
+            expanded = torch.zeros_like(new_value)
+            slices = tuple(slice(0, dim) for dim in old_value.shape)
+            expanded[slices] = old_value.to(device=expanded.device, dtype=expanded.dtype)
+            adapted[name] = expanded
+            partial.append(name)
+            continue
+        skipped.append(name)
+    module.load_state_dict(adapted)
+    return {"loaded": sorted(loaded), "partial": sorted(partial), "skipped": sorted(skipped)}
 
 
 def compose_residual_prediction(
@@ -818,9 +860,18 @@ def main():
     resume_step = 0
     if args.resume_ckpt:
         ckpt = torch.load(args.resume_ckpt, map_location="cpu", weights_only=False)
-        fm.load_state_dict(ckpt["fm_head"])
+        report = load_fm_head_state(
+            fm, ckpt["fm_head"], allow_partial=args.allow_partial_resume
+        )
         resume_step = int(ckpt.get("step", 0))
         print(f"  resumed {args.resume_ckpt} at step={resume_step}")
+        if args.allow_partial_resume:
+            print(
+                "  partial resume report: "
+                f"loaded={len(report['loaded'])} "
+                f"partial={report['partial']} "
+                f"skipped={report['skipped']}"
+            )
     n_train = sum(p.numel() for p in fm.parameters())
     print(f"FM head: {n_train/1e6:.1f}M params (all trainable)")
 
@@ -839,10 +890,21 @@ def main():
             ctc_token_emb_dim=args.ctc_token_emb_dim,
         ).to(device).bfloat16().eval()
         base_ckpt = torch.load(args.residual_base_ckpt, map_location="cpu", weights_only=False)
-        residual_base.load_state_dict(base_ckpt["fm_head"])
+        base_report = load_fm_head_state(
+            residual_base,
+            base_ckpt["fm_head"],
+            allow_partial=args.allow_partial_resume,
+        )
         for p in residual_base.parameters():
             p.requires_grad_(False)
         print(f"Residual baseline: {args.residual_base_ckpt}")
+        if args.allow_partial_resume:
+            print(
+                "  partial residual-base report: "
+                f"loaded={len(base_report['loaded'])} "
+                f"partial={base_report['partial']} "
+                f"skipped={base_report['skipped']}"
+            )
 
     ctc_head = None
     if args.ctc_condition_mode != "none":

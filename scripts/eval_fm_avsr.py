@@ -36,6 +36,7 @@ from streaminlip.fm_avsr_dataset import (
 from scripts.train_fm_avsr import (
     append_residual_base_condition,
     compose_endpoint_prediction,
+    load_fm_head_state,
     predict_energy_condition,
     residual_base_extra_dim,
 )
@@ -114,6 +115,8 @@ def parse_args():
     p.add_argument("--ckpt",          required=True)
     p.add_argument("--residual_base_ckpt", default=None,
                    help="Frozen FMHead checkpoint to add as baseline for residual checkpoints.")
+    p.add_argument("--allow_partial_resume", action="store_true",
+                   help="Allow loading compatible checkpoint tensors when condition dims are expanded.")
     p.add_argument("--residual_base_condition", action="store_true",
                    help="Append frozen residual-base recon latents as frame-level extra condition.")
     p.add_argument("--data_root",     default="data/processed")
@@ -201,13 +204,17 @@ def parse_args():
         import yaml
         with open(args.config, "r") as f:
             cfg = yaml.safe_load(f) or {}
+        if "val_clip_list" in cfg and "clip_list" not in cli_keys:
+            cfg = dict(cfg)
+            cfg["clip_list"] = cfg["val_clip_list"]
         config_keys = {"data_root", "mimi_path", "smollm2_path", "split", "clip_list",
                        "no_text_cond", "condition_mode", "text_alignment_mode", "text_source",
                        "visual_feature_name", "timbre_condition_name", "timbre_condition_dim",
                        "audio_prompt_frames", "audio_prompt_dim", "audio_prompt_pool_cond",
                        "ctc_condition_mode", "auto_avsr_ckpt", "ctc_vocab_size",
                        "ctc_topk", "ctc_token_emb_dim", "energy_condition_mode",
-                       "residual_base_ckpt", "residual_base_condition",
+                       "residual_base_ckpt", "allow_partial_resume",
+                       "residual_base_condition",
                        "n_dit_layers", "use_cross_attn", "use_text_token_cross_attn",
                        "metric_start_frame"}
         for k, v in cfg.items():
@@ -363,8 +370,17 @@ def main():
         ctc_token_emb_dim=args.ctc_token_emb_dim,
     ).to(device).bfloat16().eval()
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    fm.load_state_dict(ckpt["fm_head"])
+    report = load_fm_head_state(
+        fm, ckpt["fm_head"], allow_partial=args.allow_partial_resume
+    )
     print(f"  Loaded {args.ckpt}")
+    if args.allow_partial_resume:
+        print(
+            "  partial eval load report: "
+            f"loaded={len(report['loaded'])} "
+            f"partial={report['partial']} "
+            f"skipped={report['skipped']}"
+        )
 
     residual_base = None
     if args.residual_base_ckpt:
@@ -381,8 +397,19 @@ def main():
             ctc_token_emb_dim=args.ctc_token_emb_dim,
         ).to(device).bfloat16().eval()
         base_ckpt = torch.load(args.residual_base_ckpt, map_location="cpu", weights_only=False)
-        residual_base.load_state_dict(base_ckpt["fm_head"])
+        base_report = load_fm_head_state(
+            residual_base,
+            base_ckpt["fm_head"],
+            allow_partial=args.allow_partial_resume,
+        )
         print(f"  Loaded residual baseline {args.residual_base_ckpt}")
+        if args.allow_partial_resume:
+            print(
+                "  partial residual-base eval report: "
+                f"loaded={len(base_report['loaded'])} "
+                f"partial={base_report['partial']} "
+                f"skipped={base_report['skipped']}"
+            )
 
     # Load Mimi only when wav output is needed.
     mimi = None

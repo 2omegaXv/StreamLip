@@ -100,6 +100,65 @@ class EvalFMAVSRTest(unittest.TestCase):
 
         self.assertEqual(args.residual_base_ckpt, "runs/fm_avsr/base.pt")
 
+    def test_parse_args_loads_allow_partial_resume_from_config(self):
+        old_argv = sys.argv
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+                f.write("allow_partial_resume: true\n")
+                f.flush()
+                sys.argv = [
+                    "scripts/eval_fm_avsr.py",
+                    "--config",
+                    f.name,
+                    "--ckpt",
+                    "dummy.pt",
+                ]
+                args = eval_fm_avsr.parse_args()
+        finally:
+            sys.argv = old_argv
+
+        self.assertTrue(args.allow_partial_resume)
+
+    def test_parse_args_prefers_val_clip_list_from_train_config(self):
+        old_argv = sys.argv
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+                f.write("clip_list: train.txt\nval_clip_list: val.txt\n")
+                f.flush()
+                sys.argv = [
+                    "scripts/eval_fm_avsr.py",
+                    "--config",
+                    f.name,
+                    "--ckpt",
+                    "dummy.pt",
+                ]
+                args = eval_fm_avsr.parse_args()
+        finally:
+            sys.argv = old_argv
+
+        self.assertEqual(args.clip_list, "val.txt")
+
+    def test_parse_args_cli_clip_list_overrides_config_val_clip_list(self):
+        old_argv = sys.argv
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+                f.write("clip_list: train.txt\nval_clip_list: val.txt\n")
+                f.flush()
+                sys.argv = [
+                    "scripts/eval_fm_avsr.py",
+                    "--config",
+                    f.name,
+                    "--ckpt",
+                    "dummy.pt",
+                    "--clip_list",
+                    "manual.txt",
+                ]
+                args = eval_fm_avsr.parse_args()
+        finally:
+            sys.argv = old_argv
+
+        self.assertEqual(args.clip_list, "manual.txt")
+
     def test_eval_metric_target_should_use_normalized_latent(self):
         with tempfile.TemporaryDirectory() as tmp:
             stats = Path(tmp) / "stats.npz"

@@ -23,6 +23,7 @@ from scripts.train_fm_avsr import (
     crop_batch_to_latent_window,
     energy_extra_dim,
     explicit_cli_keys,
+    load_fm_head_state,
     residual_base_extra_dim,
     compose_residual_prediction,
     compose_endpoint_prediction,
@@ -512,6 +513,57 @@ class FMAVSRDatasetTest(unittest.TestCase):
         pred = compose_endpoint_prediction(raw, baseline)
 
         self.assertTrue(torch.equal(pred, torch.tensor([[[1.25], [1.5]]])))
+
+    def test_load_fm_head_state_can_expand_cond_projection(self):
+        import torch
+
+        model = torch.nn.Linear(5, 2)
+        old_state = {
+            "weight": torch.arange(6, dtype=torch.float32).reshape(2, 3),
+            "bias": torch.tensor([1.0, 2.0]),
+            "new_unmatched.weight": torch.ones(4),
+        }
+
+        report = load_fm_head_state(model, old_state, allow_partial=True)
+
+        self.assertEqual(report["partial"], ["weight"])
+        self.assertIn("new_unmatched.weight", report["skipped"])
+        torch.testing.assert_close(model.weight[:, :3], old_state["weight"])
+        torch.testing.assert_close(model.weight[:, 3:], torch.zeros(2, 2))
+        torch.testing.assert_close(model.bias, old_state["bias"])
+
+    def test_partial_load_keeps_old_fm_output_when_new_ctc_condition_is_zero(self):
+        import torch
+
+        from scripts.train_fm_avsr import FMHeadAVSR
+
+        torch.manual_seed(0)
+        old_model = FMHeadAVSR(n_layers=1, ctc_topk=0)
+        new_model = FMHeadAVSR(
+            n_layers=1,
+            ctc_vocab_size=10,
+            ctc_topk=2,
+            ctc_token_emb_dim=3,
+        )
+        report = load_fm_head_state(
+            new_model, old_model.state_dict(), allow_partial=True
+        )
+        self.assertIn("cond_proj.weight", report["partial"])
+
+        vis = torch.randn(1, 3, 768)
+        text = torch.randn(1, 3, 960)
+        spk = torch.randn(1, 256)
+
+        old_out = old_model.reconstruct_from_cond(vis, text, spk)
+        new_out = new_model.reconstruct_from_cond(
+            vis,
+            text,
+            spk,
+            ctc_topk_ids=torch.zeros(1, 3, 2, dtype=torch.long),
+            ctc_topk_probs=torch.zeros(1, 3, 2),
+        )
+
+        torch.testing.assert_close(new_out, old_out)
 
     def test_predict_energy_condition_uses_residual_baseline_when_available(self):
         import torch

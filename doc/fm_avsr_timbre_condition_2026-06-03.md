@@ -313,6 +313,7 @@ Combined 59,144 split:
 | 59k residual from step5000 | 1000 | 0.58167589 | 0.66776208 | 0.60182909 | previous best full eval |
 | 59k residual + denoise loss | 1250 | 0.58173362 | 0.66768414 | 0.60181177 | `lambda_denoise=0.1`, `denoise_t=[0, 0.1]` |
 | 59k residual + denoise loss | 1500 | 0.58176819 | 0.66763995 | 0.60180507 | current best verified full eval |
+| 59k residual + CTC top-k condition | 1500 | 0.58177180 | 0.66764077 | 0.60178911 | `ctc_condition_mode=topk`; effectively tied with denoise |
 
 The 50k scale-up improved the best full eval from `0.57255184` to
 `0.58091919`. Residual timbre-stat continuation added only `+0.00013806`
@@ -352,6 +353,56 @@ as an extra 512-d per-frame condition for the residual head. It reached
 the timbre-stats continuation (`0.58105725`). Exposing the base prediction
 directly to the residual head therefore did not unlock additional validation
 correlation.
+
+### CTC Top-k Condition Continuation
+
+Run:
+`runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_residual_ctctopk_from1000_recon_textjson_wordts_v1`
+
+Config:
+`configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_residual_ctctopk_from1000_recon_textjson_wordts.yaml`
+
+This continuation adds Auto-AVSR CTC top-k posterior tokens as an extra
+frame-level condition while keeping the same timbre mean/std condition,
+38-frame audio prompt tokens, pooled prompt condition, and residual baseline.
+Because CTC top-k expands `cond_proj`, the run uses a partial checkpoint load:
+all old tensors with matching shape are loaded, the old `cond_proj.weight`
+columns are copied, and the new CTC columns are zero-initialized. The frozen
+residual base uses the same partial load, so its output is unchanged when the
+new CTC inputs are not used.
+
+Training:
+
+- resume: 59k residual step1000
+- residual base: 59k pooled prompt step5000
+- `ctc_condition_mode: topk`
+- `ctc_topk: 4`
+- `ctc_token_emb_dim: 32`
+- `lr: 5e-5`
+- max extra steps: 500
+- small validation recon corr: `0.58427014` at step1250,
+  `0.58427079` at step1500
+
+Full val1000 eval at step1500:
+
+- metrics:
+  `eval_out/lipavsr_59144_timbre3s_audioprompt38_pool_residual_ctctopk_step1500_fixval1000_metrics/metrics.json`
+- `mean_corr: 0.58177180`
+- `mean_mse: 0.66764077`
+- `mean_mae: 0.60178911`
+
+This is only `+0.00000361` over the denoise step1500 full eval
+(`0.58176819`). Per-clip comparison is split almost exactly evenly
+(`492` clips better, `508` worse), so the CTC top-k condition is effectively a
+tie rather than a meaningful improvement. It does not move the system toward
+the `0.6` target.
+
+While running this eval, another config safety issue was found: training YAMLs
+contain both `clip_list` and `val_clip_list`, but `eval_fm_avsr.py` originally
+used `clip_list`, which silently evaluates the train split unless the val split
+is passed explicitly on the command line. Eval config loading now maps
+`val_clip_list` to `clip_list` when the user did not explicitly provide
+`--clip_list`, and this behavior is covered by unit tests.
 
 ### Prompt Calibration Diagnostics
 
@@ -411,7 +462,9 @@ additional gain, and residual refinement on top of the best prompt model gives a
 further small correction. A light corr loss, GT energy, prompt affine
 calibration, and post-prompt timbre-stat matching all add almost nothing after
 residual training. Passing the frozen base reconstruction back in as a residual
-condition also fails to improve full eval. Adding the remaining 9,144 ready
+condition also fails to improve full eval. Adding CTC top-k posterior tokens as
+an extra per-frame condition is also effectively a tie, improving full-val corr
+by only `0.00000361`. Adding the remaining 9,144 ready
 lip-AVSR clips is the strongest positive move in the latest batch, but it only
 raises full eval to `0.58167589`, and a light denoise endpoint continuation only
 raises it further to `0.58176819`. The remaining gap to 0.6 is likely not just
@@ -433,5 +486,7 @@ Code support for `timbre_cond` and `audio_prompt` was covered by unit tests:
 - `uv run python -m py_compile scripts/train_fm_avsr.py scripts/eval_fm_avsr.py src/streaminlip/fm_avsr_dataset.py src/streaminlip/v2/fm_head.py`
 - `uv run python -m unittest tests.test_eval_fm_avsr tests.test_fm_avsr_dataset -v`
 - `uv run python -m py_compile scripts/eval_fm_avsr.py scripts/train_fm_avsr.py`
+- `uv run python -m unittest tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_load_fm_head_state_can_expand_cond_projection tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_partial_load_keeps_old_fm_output_when_new_ctc_condition_is_zero tests.test_eval_fm_avsr.EvalFMAVSRTest.test_parse_args_loads_allow_partial_resume_from_config -v`
+- `uv run python -m unittest tests.test_eval_fm_avsr.EvalFMAVSRTest.test_parse_args_prefers_val_clip_list_from_train_config tests.test_eval_fm_avsr.EvalFMAVSRTest.test_parse_args_cli_clip_list_overrides_config_val_clip_list tests.test_eval_fm_avsr.EvalFMAVSRTest.test_parse_args_loads_allow_partial_resume_from_config -v`
 
 All individual training/eval runs in this note were kept under the 1-hour limit.
