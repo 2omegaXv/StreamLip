@@ -26,11 +26,18 @@ def masked_mse_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
     lengths: torch.Tensor | None = None,
+    start_frame: int = 0,
 ) -> torch.Tensor:
     """MSE over valid sequence frames only; falls back to full MSE without lengths."""
+    start_frame = max(int(start_frame), 0)
+    if start_frame > 0:
+        pred = pred[:, start_frame:]
+        target = target[:, start_frame:]
+        if lengths is not None:
+            lengths = (lengths - start_frame).clamp_min(0)
     if lengths is None:
         return F.mse_loss(pred.float(), target.float())
-    lengths = lengths.to(device=pred.device, dtype=torch.long).clamp(min=1, max=pred.shape[1])
+    lengths = lengths.to(device=pred.device, dtype=torch.long).clamp(min=0, max=pred.shape[1])
     mask = torch.arange(pred.shape[1], device=pred.device).unsqueeze(0) < lengths.unsqueeze(1)
     mask = mask.unsqueeze(-1)
     diff2 = (pred.float() - target.float()).pow(2) * mask

@@ -256,6 +256,17 @@ class FMAVSRDatasetTest(unittest.TestCase):
 
         self.assertAlmostEqual(loss.item(), 1.0)
 
+    def test_masked_mse_loss_can_skip_prompt_frames(self):
+        import torch
+
+        pred = torch.tensor([[[10.0], [1.0], [2.0]]])
+        target = torch.zeros_like(pred)
+        lengths = torch.tensor([3])
+
+        loss = masked_mse_loss(pred, target, lengths, start_frame=1)
+
+        self.assertAlmostEqual(loss.item(), 2.5)
+
     def test_masked_corr_loss_is_zero_for_perfect_valid_frames(self):
         import torch
 
@@ -277,6 +288,17 @@ class FMAVSRDatasetTest(unittest.TestCase):
         loss = masked_corr_loss(pred, target, lengths)
 
         self.assertAlmostEqual(loss.item(), 2.0, places=5)
+
+    def test_masked_corr_loss_can_skip_prompt_frames(self):
+        import torch
+
+        pred = torch.tensor([[[100.0], [1.0], [2.0], [3.0]]])
+        target = torch.tensor([[[-100.0], [1.0], [2.0], [3.0]]])
+        lengths = torch.tensor([4])
+
+        loss = masked_corr_loss(pred, target, lengths, start_frame=1)
+
+        self.assertAlmostEqual(loss.item(), 0.0, places=5)
 
     def test_masked_corr_loss_has_finite_grad_for_constant_prediction(self):
         import torch

@@ -214,6 +214,8 @@ def parse_args():
                    help="Euler steps for validation sampled endpoint metrics.")
     p.add_argument("--metric_start_frame", type=int, default=0,
                    help="Skip this many latent frames when reporting endpoint metrics.")
+    p.add_argument("--loss_start_frame", type=int, default=0,
+                   help="Skip this many latent frames when computing endpoint reconstruction losses.")
     p.add_argument("--no_wandb",         action="store_true")
     p.add_argument("--debug",            action="store_true")
     cli_keys = explicit_cli_keys()
@@ -314,13 +316,25 @@ def aggregate_sample_metrics(
     }
 
 
-def masked_corr_loss(pred: torch.Tensor, target: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+def masked_corr_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    lengths: torch.Tensor,
+    start_frame: int = 0,
+) -> torch.Tensor:
     """Return 1 - global Pearson corr over valid latent values."""
-    lengths = lengths.to(device=pred.device, dtype=torch.long).clamp(min=1, max=pred.shape[1])
+    start_frame = max(int(start_frame), 0)
+    if start_frame > 0:
+        pred = pred[:, start_frame:]
+        target = target[:, start_frame:]
+        lengths = lengths - start_frame
+    lengths = lengths.to(device=pred.device, dtype=torch.long).clamp(min=0, max=pred.shape[1])
     mask = torch.arange(pred.shape[1], device=pred.device).unsqueeze(0) < lengths.unsqueeze(1)
     mask = mask.unsqueeze(-1).expand_as(pred)
     pred_v = pred.float()[mask]
     target_v = target.float()[mask]
+    if pred_v.numel() == 0:
+        return pred.float().new_zeros(())
     pred_c = pred_v - pred_v.mean()
     target_c = target_v - target_v.mean()
     eps = 1e-6
@@ -975,16 +989,29 @@ def main():
                             pca_target if args.recon_target_pca_mode == "replace" else lat_gt
                         )
                         if args.lambda_recon > 0:
-                            loss_recon = masked_mse_loss(pred_recon, lat_recon_target, lat_lens)
+                            loss_recon = masked_mse_loss(
+                                pred_recon,
+                                lat_recon_target,
+                                lat_lens,
+                                start_frame=args.loss_start_frame,
+                            )
                         else:
                             loss_recon = loss_fm.new_zeros(())
                         if args.lambda_recon_pca > 0:
-                            loss_recon_pca = masked_mse_loss(pred_recon, pca_target, lat_lens)
+                            loss_recon_pca = masked_mse_loss(
+                                pred_recon,
+                                pca_target,
+                                lat_lens,
+                                start_frame=args.loss_start_frame,
+                            )
                         else:
                             loss_recon_pca = loss_fm.new_zeros(())
                         if args.lambda_recon_corr > 0:
                             loss_recon_corr = masked_corr_loss(
-                                pred_recon, lat_recon_target, lat_lens
+                                pred_recon,
+                                lat_recon_target,
+                                lat_lens,
+                                start_frame=args.loss_start_frame,
                             )
                         else:
                             loss_recon_corr = loss_fm.new_zeros(())
@@ -1004,7 +1031,12 @@ def main():
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
                         )
-                        loss_sample_recon = masked_mse_loss(pred_sample, lat_gt, lat_lens)
+                        loss_sample_recon = masked_mse_loss(
+                            pred_sample,
+                            lat_gt,
+                            lat_lens,
+                            start_frame=args.loss_start_frame,
+                        )
                     else:
                         loss_sample_recon = loss_fm.new_zeros(())
                     if args.lambda_denoise > 0:
@@ -1022,7 +1054,12 @@ def main():
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
                         )
-                        loss_denoise = masked_mse_loss(pred_denoise, lat_gt, lat_lens)
+                        loss_denoise = masked_mse_loss(
+                            pred_denoise,
+                            lat_gt,
+                            lat_lens,
+                            start_frame=args.loss_start_frame,
+                        )
                     else:
                         loss_denoise = loss_fm.new_zeros(())
                     loss = combine_training_losses(

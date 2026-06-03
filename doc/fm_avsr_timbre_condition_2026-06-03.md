@@ -91,6 +91,7 @@ stopping in mind.
 | 30k mean/std + audio prompt tokens | 2500 | 0.56893905 | 0.68224197 | 0.61025584 | full 1k eval |
 | 30k mean/std + audio prompt tokens | 3000 | 0.56967886 | 0.68265299 | 0.60941165 | full 1k eval, 2500-step continuation |
 | 30k mean/std + audio prompt tokens + pooled prompt cond | 2500 | 0.56971665 | 0.68110923 | 0.61001512 | full 1k eval |
+| 30k audio prompt tokens + loss start 38 | 1000 | n/a | n/a | n/a | early stopped; training-val corr 0.54083031 |
 | 30k audio prompt tokens, shifted condition | 2500 | 0.00798798 | 1.28502175 | 0.87642337 | full 1k negative control, `condition_shift=1` |
 
 The best verified full-eval result is `0.56971665` from the pooled audio prompt
@@ -143,6 +144,24 @@ Full 1k eval at step2500 is `0.56971665`. This is only `+0.00077760` over the
 token-only prompt step2500 full eval, and only `+0.00003779` over the token-only
 step3000 full eval. It is therefore a measurable but marginal improvement.
 
+### Prompt-Skipped Reconstruction Loss
+
+Run:
+`runs/fm_avsr/lipavsr_30000_timbre3s_audioprompt38_lossstart38_recon_textjson_wordts_v1`
+
+This variant keeps the token-only audio prompt architecture but sets
+`loss_start_frame: 38`, so deterministic reconstruction losses skip the same
+prompt segment that eval skips.
+
+| Step | Val recon corr | Elapsed |
+| ---: | ---: | ---: |
+| 500 | 0.51479245 | 337.1739s |
+| 1000 | 0.54083031 | 644.0767s |
+
+It was early stopped after step1000 because it trailed the token-only prompt run
+at both shared checkpoints (`0.5148` vs `0.5162` at 500, `0.5408` vs `0.5466` at
+1000). Skipping the prompt segment in the loss did not help.
+
 ## Interpretation
 
 Manual timbre control is practical in this codebase. The mean/std prompt is a
@@ -156,12 +175,6 @@ The current best prompt is same-clip and should be treated as an upper-bound
 style diagnostic. A production-style voice control path should next test
 same-speaker external prompts, stronger prompt fusion, or an explicit speaker /
 prompt consistency loss.
-
-The next low-risk experiment should align training and evaluation more tightly:
-when using same-clip prompt frames, the reconstruction loss currently still
-includes the first 38 prompt frames even though eval skips them. Skipping prompt
-frames in the reconstruction loss may focus capacity on the non-prompt segment
-that is actually measured.
 
 ## Verification
 
