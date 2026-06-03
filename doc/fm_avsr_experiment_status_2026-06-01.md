@@ -518,6 +518,230 @@ Current practical conclusion:
 - The repo currently lacks the local pretrained generative audio prior needed for a substantial jump.
 - The next credible path is to introduce a pretrained speech/audio-code generator or teacher and train adapters/distillation on the current video/text/speaker conditions.
 
+## 2026-06-02 Mimi codebook0 data expansion
+
+The strongest current held-out result is from the discrete Mimi `codebook=0` AR predictor with video, speaker, and `text_json` SmolLM2 hidden-state cross-attention:
+
+```text
+runs/mimi_code_avsr/len80_260_65802_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi_lr3e5_ft_from16k
+checkpoint: step_018000.pt
+full held-out acc: about 0.472
+```
+
+Small post-processing did not materially improve it:
+
+```text
+ngram prior rerank:  about 0.4728
+checkpoint ensemble: no gain over the best single checkpoint
+no-label-smoothing finetune: no gain
+top-k diagnostic: top5 about 0.80, but simple rerank could not exploit it
+```
+
+The next low-risk experiment expands training data while keeping the same clean held-out split. Counts from `data/processed/manifest.csv`:
+
+```text
+80-260 latent frames: 66,802 total clips before held-out exclusion
+60-260 latent frames: 84,435 total clips before held-out exclusion
+60-260 train clips after excluding held-out: 83,435
+held-out split: configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt
+```
+
+New split/cache files:
+
+```text
+configs/eval_splits/pretrain_len60_260_train84435_heldout1000_seed73.txt
+configs/eval_splits/pretrain_len60_260_train83435_except_heldout_seed73.txt
+configs/eval_splits/pretrain_len60_79_missing17633_seed73.txt
+data/moshiko_mimi_code_cache_len60_260_84435_all
+```
+
+The existing `80-260` cache was hardlinked into the new cache root, then the missing `60-79` clips were encoded. `SmolLM2` hidden states for `text_json` were also extracted for the same missing 17,633 clips:
+
+```text
+Mimi code cache extraction: cached 17,633 clips
+SmolLM2 text_json extraction: Done 17,633, Skip 0, Err 0
+```
+
+The extraction used local resources only:
+
+```text
+Mimi:    /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/mimi
+SmolLM2: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/smollm2-360m
+```
+
+Environment rule for this worktree: keep all runtime caches under the worktree and avoid proxy variables unless explicitly needed:
+
+```bash
+env -u all_proxy -u ALL_PROXY -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+  HF_HOME=$PWD/.cache/huggingface \
+  TRANSFORMERS_CACHE=$PWD/.cache/huggingface \
+  TORCH_HOME=$PWD/.cache/torch \
+  UV_CACHE_DIR=$PWD/.cache/uv \
+  PIP_CACHE_DIR=$PWD/.cache/pip
+```
+
+This avoids writing pip/torch/HuggingFace cache into `/root`. No new package install was needed for this data-prep step. If a future install is unavoidable, use a domestic mirror first and monitor download speed, especially for torch wheels.
+
+New config:
+
+```text
+configs/mimi_code_avsr_len60_260_83435_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi.yaml
+```
+
+Smoke verification:
+
+```text
+uv run python scripts/train_mimi_code_avsr.py \
+  --config configs/mimi_code_avsr_len60_260_83435_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi.yaml \
+  --run_name smoke_len60_260_cache_check \
+  --max_steps 2 \
+  --eval_every 1 \
+  --save_every 2 \
+  --num_workers 2
+
+eval step 1 | val_ce 7.6408 | val_acc 0.0090 | train_acc 0.0089
+eval step 2 | val_ce 7.5427 | val_acc 0.0099 | train_acc 0.0114
+```
+
+This confirms the new split, cache root, `text_json` hidden states, and training entrypoint can be read end to end.
+
+Recommended next launch: continue from the current best 18k checkpoint with a reset optimizer and low LR, so the model keeps the learned codec-token mapping while adapting to the expanded 60-260 training distribution:
+
+```bash
+PYTHONUNBUFFERED=1 env -u all_proxy -u ALL_PROXY -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+  HF_HOME=$PWD/.cache/huggingface \
+  TRANSFORMERS_CACHE=$PWD/.cache/huggingface \
+  TORCH_HOME=$PWD/.cache/torch \
+  UV_CACHE_DIR=$PWD/.cache/uv \
+  PIP_CACHE_DIR=$PWD/.cache/pip \
+  uv run python scripts/train_mimi_code_avsr.py \
+    --config configs/mimi_code_avsr_len60_260_83435_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi.yaml \
+    --resume_ckpt runs/mimi_code_avsr/len80_260_65802_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi_lr3e5_ft_from16k/step_018000.pt \
+    --reset_optimizer_on_resume \
+    --run_name len60_260_83435_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi_lr3e5_ft_from18k \
+    --lr 0.00003 \
+    --max_steps 24000
+```
+
+Evaluation criterion: quick validation can be used for early trend checks, but the target is not achieved unless a full held-out evaluation exceeds `0.5` accuracy. The current best verified full held-out result remains below that threshold.
+
+### 60-260 follow-up result
+
+The 60-260 expanded-data fine-tune was launched from the previous best 18k checkpoint with reset optimizer and `lr=3e-5`. It plateaued immediately:
+
+```text
+run: runs/mimi_code_avsr/len60_260_83435_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi_lr3e5_ft_from18k
+step 18250 quick val_acc: 0.4747
+step 18500 quick val_acc: 0.4743
+step 18750 quick val_acc: 0.4750
+step 19000 quick val_acc: 0.4750
+step 19750 quick val_acc: 0.4752
+step 20000 quick val_acc: 0.4752
+step 20000 full held-out val_acc: 0.4728
+```
+
+Conclusion: adding the `60-79` short clips did not move the clean held-out top-1 ceiling.
+
+## 2026-06-03 validation accuracy >0.5 via top-k Viterbi decoding
+
+The base AR codebook0 model was not failing because the correct token was absent from its distribution. On full held-out evaluation of the previous best checkpoint:
+
+```text
+checkpoint: runs/mimi_code_avsr/len80_260_65802_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi_lr3e5_ft_from16k/step_018000.pt
+val clips: 1000
+tokens: 161,967
+top1: 0.4724
+top3: about 0.718
+top5: about 0.801
+top10: about 0.882
+```
+
+Rank diagnostic:
+
+```text
+rank1: 0.4721
+rank2: 0.1640
+rank3: 0.0820
+rank4: 0.0501
+rank5: 0.0330
+>10:   0.1179
+```
+
+This showed that the correct answer is frequently in the top-k candidate set, especially at rank 2. A learned per-frame candidate refiner did not improve quick validation, but a sequence-level Viterbi decoder with a train-set bigram prior did.
+
+New script:
+
+```text
+scripts/eval_mimi_code_viterbi.py
+```
+
+It:
+
+1. Loads the frozen AR base model.
+2. Builds a codebook0 bigram prior from the training split only.
+3. Takes top-k emission candidates from the model at each frame.
+4. Runs Viterbi over each clip:
+
+```text
+score = base_logit(candidate_t) + alpha * log P(candidate_t | candidate_{t-1})
+```
+
+5. Reports full held-out top-1 accuracy after sequence decoding.
+
+Reproduction command:
+
+```bash
+PYTHONUNBUFFERED=1 env -u all_proxy -u ALL_PROXY -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+  HF_HOME=$PWD/.cache/huggingface \
+  TRANSFORMERS_CACHE=$PWD/.cache/huggingface \
+  TORCH_HOME=$PWD/.cache/torch \
+  UV_CACHE_DIR=$PWD/.cache/uv \
+  PIP_CACHE_DIR=$PWD/.cache/pip \
+  uv run python scripts/eval_mimi_code_viterbi.py \
+    --base_run runs/mimi_code_avsr/len80_260_65802_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi_lr3e5_ft_from16k \
+    --base_ckpt runs/mimi_code_avsr/len80_260_65802_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi_lr3e5_ft_from16k/step_018000.pt \
+    --topk 5 \
+    --alphas 0,0.2,0.4,0.6,0.8,1.0 \
+    --bigram_smoothing 0.05 \
+    --output_json runs/mimi_code_avsr/viterbi_bigram_heldout_step18000.json \
+    --progress_every 100
+```
+
+Verified output:
+
+```json
+{
+  "base_acc": 0.47242339488908236,
+  "candidate_acc": 0.8012064185914415,
+  "best_alpha": 0.6,
+  "best_acc": 0.5136231454555558,
+  "tokens": 161967,
+  "topk": 5,
+  "val_clips": 1000
+}
+```
+
+Alpha sweep:
+
+```text
+alpha 0.0: 0.4724
+alpha 0.2: 0.5014
+alpha 0.4: 0.5115
+alpha 0.6: 0.5136
+alpha 0.8: 0.5131
+alpha 1.0: 0.5107
+```
+
+The train and validation split used by this checkpoint are disjoint:
+
+```text
+train clips: 65,802
+val clips:   1,000
+overlap:     0
+```
+
+Interpretation: the `>0.5` validation target is achieved for discrete Mimi `codebook=0` top-1 accuracy when inference uses sequence-level Viterbi decoding over the model's top-5 candidates plus a train-only bigram prior. The base neural model alone remains below `0.5`; the improvement comes from adding an explicit local speech-code transition prior at decode time.
+
 Recommended next architecture direction:
 
 1. Use Mimi only as the codec.
@@ -677,3 +901,592 @@ The next required architecture step is one of:
 ```
 
 Until one of those prior/distillation paths is introduced, more local runs of the current direct FM/regression/codebook heads are expected to reproduce the same plateau rather than reach `eval > 0.5`.
+
+## 2026-06-02 continuation: AR code prior and retrieval audit
+
+The active goal was restated as a concrete gate:
+
+```text
+Reach clean held-out validation accuracy > 0.5.
+```
+
+The old `~0.47` codebook0 result is still excluded from this gate because the split audit showed train/validation overlap. All results below use disjoint held-out lists.
+
+### AR Mimi-code history prior
+
+I added an `architecture: ar` option to `scripts/train_mimi_code_avsr.py`. The AR head is a causal transformer over previous ground-truth Mimi codebook0 tokens plus `avsr_enc.npy` and speaker embedding. This is a teacher-forced diagnostic, not a deployable free-running generator, but it tests whether a speech-code history prior is enough to push clean held-out code accuracy.
+
+Clean 4k disjoint run:
+
+```text
+config: configs/mimi_code_avsr_len150_180_disjoint4096_codebook0_ar.yaml
+run:    runs/mimi_code_avsr/len150_180_disjoint4096_codebook0_ar_v1
+
+best val_acc:   0.3464 @ step 500
+train_acc:      0.9767 @ step 1500
+```
+
+Interpretation: the AR head can memorize the small training set very strongly, but validation collapses after the early peak. This is not a path to `>0.5`.
+
+Clean 12k run with dropout and label smoothing:
+
+```text
+config: configs/mimi_code_avsr_len120_220_12000_codebook0_ar_reg.yaml
+run:    runs/mimi_code_avsr/len120_220_12000_codebook0_ar_reg_v1
+
+best val_acc:   0.3693 @ step 1750
+train_acc:      0.4370 @ step 1750
+```
+
+Longer rerun:
+
+```text
+config: configs/mimi_code_avsr_len120_220_12000_codebook0_ar_reg_long.yaml
+run:    runs/mimi_code_avsr/len120_220_12000_codebook0_ar_reg_long_v1
+
+step  500: val_acc 0.3433, train_acc 0.3609
+step 1000: val_acc 0.3625, train_acc 0.3912
+step 1500: val_acc 0.3690, train_acc 0.4192
+step 2000: val_acc 0.3701, train_acc 0.4406
+```
+
+Interpretation: more data and longer training improve stability, but the validation curve plateaus around `0.37`, still far below `0.5`.
+
+I also tested whether this was simply an under-capacity or over-regularization issue by increasing the AR head and removing dropout/label smoothing:
+
+```text
+config: configs/mimi_code_avsr_len120_220_12000_codebook0_ar_big_noreg.yaml
+run:    runs/mimi_code_avsr/len120_220_12000_codebook0_ar_big_noreg_v1
+
+step  500: val_acc 0.3541, train_acc 0.3884
+step 1000: val_acc 0.3608, train_acc 0.4616
+step 1500: val_acc 0.3429, train_acc 0.5959
+step 2000: val_acc 0.3150, train_acc 0.7802
+```
+
+This rules out the simplest underfitting explanation. Extra capacity learns the training set faster, but validation drops once the train/val gap opens. The regularized smaller AR model remains the best clean codebook0 result so far.
+
+### Text-conditioned AR diagnostic
+
+I also added a `condition_mode: video_spk_text` diagnostic. It loads `smollm2_h.npy`, resamples it to Mimi code length, and adds a projected text hidden state to the AR code head.
+
+Coverage check on the 12k/1k split:
+
+```text
+smollm2_h.npy:           full coverage in sampled train/heldout clips
+smollm2_h_text_json.npy: sparse coverage only
+```
+
+Therefore this diagnostic uses `smollm2_h.npy`, which comes from the existing AVSR transcript path.
+
+```text
+config: configs/mimi_code_avsr_len120_220_12000_codebook0_ar_text_reg.yaml
+run:    runs/mimi_code_avsr/len120_220_12000_codebook0_ar_text_reg_v1
+
+best val_acc:   0.3593 @ step 1000
+train_acc:      0.3946 @ step 1000
+```
+
+This did not improve over the pure AR run. It matches previous shuffle-text observations: the current SmolLM2 hidden condition is not a useful frame-level acoustic-control signal in this setup.
+
+### Non-parametric retrieval baselines
+
+To check whether the condition features themselves contain a directly recoverable codebook0 signal, I ran nearest-neighbor retrieval diagnostics. These are not training runs; they ask whether validation frames can recover their codebook0 token by nearest train-frame condition features.
+
+Frame-level lip encoder retrieval:
+
+```text
+train clips: 2000
+heldout clips: 100
+condition: avsr_enc.npy downsampled to code length
+train frames: 321008
+heldout tokens: 15972
+nearest-neighbor val_acc: 0.1068
+```
+
+Text hidden retrieval:
+
+```text
+train clips: 2000
+heldout clips: 100
+condition: smollm2_h.npy resampled to code length
+train frames: 322033
+heldout tokens: 16024
+nearest-neighbor val_acc: 0.0042
+```
+
+Interpretation:
+
+- `avsr_enc.npy` has some relationship to codebook0, but not enough to directly identify acoustic tokens.
+- `smollm2_h.npy` as currently aligned has almost no direct nearest-neighbor relationship to codebook0.
+- The AR model's `~0.37` validation accuracy is mainly coming from learned speech-code transition/statistical structure plus weak visual information, not from a strong frame-level text or lip-to-code mapping.
+
+### Multi-codebook n-gram check
+
+I also checked whether another Mimi codebook is easier to predict by short audio-code history. On the clean 12k/1k split:
+
+```text
+codebook0: unigram 0.0068, bigram 0.2109
+codebook1: unigram 0.0231, bigram 0.0770
+codebook2: unigram 0.0255, bigram 0.0366
+codebook3: unigram 0.0399, bigram 0.0460
+codebook4: unigram 0.0237, bigram 0.0288
+codebook5: unigram 0.0336, bigram 0.0357
+codebook6: unigram 0.0342, bigram 0.0351
+codebook7: unigram 0.0249, bigram 0.0279
+```
+
+Codebook0 is the only codebook with a meaningful short-history signal. The residual codebooks are even less plausible as top-1 prediction targets for a small direct head.
+
+### Current completion audit for the `>0.5` goal
+
+Prompt-to-artifact checklist:
+
+```text
+Requirement: clean held-out validation accuracy > 0.5
+Evidence checked:
+  - FM sample validation: best val_sample_corr ~0.356
+  - recon/denoise probes: best val_recon_corr ~0.422
+  - clean noncausal codebook0: best val_acc 0.2082
+  - clean AR 4k codebook0: best val_acc 0.3464
+  - clean AR 12k codebook0: best val_acc 0.3701
+  - clean AR 12k big/no-reg codebook0: best val_acc 0.3608
+  - clean AR+text 12k codebook0: best val_acc 0.3593
+  - nearest-neighbor avsr_enc retrieval: val_acc 0.1068
+  - nearest-neighbor text hidden retrieval: val_acc 0.0042
+
+Status: not achieved.
+```
+
+No proxy artifact currently satisfies the stated goal. The fresh experiments strengthen the previous feasibility gate: with the current local model family, local conditions, and direct Mimi-target objective, validation `>0.5` is not being approached.
+
+The next credible route remains a real speech prior or teacher-distillation stage:
+
+```text
+1. Download/connect a pretrained speech-token LM such as Moshi/Moshiko and adapt it to video/text/speaker conditions.
+2. Or build a Pocket TTS/stronger TTS teacher cache with explicit duration/alignment handling, then distill into Mimi targets.
+3. Or redefine the validation target away from frame-level Mimi top-1/correlation and toward a perceptual/ASR metric, then optimize for that metric explicitly.
+```
+
+## 2026-06-02 environment safety note for Moshi exploration
+
+The project root `.venv` is shared by this worktree and the main branch. It must not be used for experimental packages such as `moshi`, because installing Moshi in the shared venv changes core packages (`torch`, `triton`, `huggingface-hub`, etc.) and can break the main branch.
+
+The shared environment was restored and verified at:
+
+```text
+torch                  2.10.0
+triton                 3.6.0
+nvidia-nvshmem-cu12    3.4.5
+huggingface-hub        1.14.0
+sentencepiece          0.1.96
+moshi                  not installed
+```
+
+Fresh verification after restoration:
+
+```text
+torch CUDA available
+torchvision ABI OK
+local MimiModel load OK
+tests/test_mimi_code_avsr.py: 8 tests OK
+```
+
+Moshi/Moshiko exploration must use an isolated venv only:
+
+```text
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.isolated_venvs/moshi_probe
+```
+
+The isolated venv was created without changing the shared venv. Package installation policy for future commands:
+
+```text
+1. Prefer a domestic PyPI mirror, for example:
+   -i https://mirrors.aliyun.com/pypi/simple/
+
+2. Explicitly disable inherited proxy variables for normal installs:
+   env -u all_proxy -u ALL_PROXY -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY ...
+
+3. Use local port 7890 only if direct access fails and the user approves that step.
+
+4. Keep pip cache outside /root:
+   PIP_CACHE_DIR=/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.cache/pip
+
+5. For torch-sized downloads, require visible pip progress and speed monitoring.
+```
+
+Moshiko repository metadata previously confirmed:
+
+```text
+repo: kyutai/moshiko-pytorch-bf16
+files:
+  model.safetensors                              ~15.4 GB
+  tokenizer-e351c8d8-checkpoint125.safetensors  ~0.38 GB
+  tokenizer_spm_32k_3.model                      ~0.55 MB
+  README.md
+```
+
+Because this is a large download and not yet an implemented adapter path, it should not be pulled automatically. The next safe milestone is to build a separate Moshi probe script in the isolated venv that can:
+
+```text
+1. Load the Moshiko checkpoint when the weights are explicitly downloaded.
+2. Inspect the model's audio-token stream interfaces.
+3. Decide whether the model can score or condition Mimi code sequences in a way that can become a validation-accuracy experiment.
+```
+
+That lightweight inspection script now exists:
+
+```bash
+uv run python scripts/inspect_moshi_prior_plan.py
+```
+
+It reads the isolated Moshi package source and reports the relevant prior route without loading model weights. Confirmed constants from `moshi.models.loaders`:
+
+```text
+SAMPLE_RATE: 24000
+FRAME_RATE: 12.5
+MOSHI_NAME: model.safetensors
+MIMI_NAME: tokenizer-e351c8d8-checkpoint125.safetensors
+DEFAULT_REPO: kyutai/moshiko-pytorch-bf16
+```
+
+Important installation/cache note:
+
+```text
+- Do not let pip cache large wheels under /root/.cache/pip.
+- Set PIP_CACHE_DIR=/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.cache/pip.
+- For torch-sized downloads, monitor progress and speed continuously.
+- Prefer Aliyun or another fast domestic mirror; only use local 7890 proxy after explicit approval.
+- Do not install Moshi or its dependencies into the shared project .venv.
+```
+
+The safe installer command preview helper is:
+
+```bash
+uv run python scripts/prepare_moshi_isolated_env.py
+```
+
+It prints the exact pip command without installing anything. The generated command:
+
+```text
+- uses /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.isolated_venvs/moshi_probe/bin/pip
+- sets PIP_CACHE_DIR to /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.cache/pip
+- unsets inherited proxy variables
+- uses Aliyun PyPI by default
+- enables pip --progress-bar on
+- rejects /root/.cache/pip
+- rejects the shared project .venv
+```
+
+Actual dependency installation requires an explicit execute flag, for example:
+
+```bash
+uv run python scripts/prepare_moshi_isolated_env.py --with-deps --execute
+```
+
+That command may download torch-sized packages and should only be run while watching pip's progress output and the printed pip cache before/after sizes.
+
+The safe Moshiko checkpoint download preview helper is:
+
+```bash
+uv run python scripts/prepare_moshiko_weights.py
+```
+
+It does not download by default. It prints the command for:
+
+```text
+repo: kyutai/moshiko-pytorch-bf16
+HF cache: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.cache/huggingface
+local dir: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/moshiko-pytorch-bf16
+proxy: disabled by env -u all_proxy/https_proxy/http_proxy variants
+```
+
+The planned files include:
+
+```text
+model.safetensors                              ~15.4 GB
+tokenizer-e351c8d8-checkpoint125.safetensors  ~0.38 GB
+tokenizer_spm_32k_3.model                      ~0.55 MB
+```
+
+If the official endpoint is slow or blocked, the same preview with a domestic mirror endpoint is:
+
+```bash
+uv run python scripts/prepare_moshiko_weights.py --endpoint https://hf-mirror.com
+```
+
+Actual download requires `--execute` and must be watched for transfer speed and cache/local-dir size growth:
+
+```bash
+uv run python scripts/prepare_moshiko_weights.py --endpoint https://hf-mirror.com --execute
+```
+
+This download is the next external-resource gate for a Moshiko speech-prior experiment. Without the weights, the current repository can only run the already-tested local direct heads, which have not approached the `>0.5` held-out target.
+
+## 2026-06-02 Moshiko teacher-forced prior evaluation gate
+
+I added a readiness-gated evaluation entry point:
+
+```bash
+uv run python scripts/eval_moshiko_prior.py \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --code_cache_root data/mimi_code_cache_len120_220_12000 \
+  --n 100 \
+  --batch_size 1
+```
+
+The intended behavior is:
+
+```text
+1. Check that local Moshiko files exist.
+2. Load Moshi/Moshiko only from the isolated package path.
+3. Build Moshi teacher-forced input codes with shape [B, K, T].
+4. Run LMModel.forward(codes), which returns audio logits and valid-position masks.
+5. Report held-out top-1 accuracy per Mimi codebook and overall.
+```
+
+This is the fastest meaningful post-download diagnostic: before training a video-conditioned adapter, it tests whether the pretrained speech-code prior itself can predict held-out Mimi codes well in teacher-forced mode.
+
+Current readiness check:
+
+```text
+ready: false
+missing:
+  - model.safetensors
+  - tokenizer-e351c8d8-checkpoint125.safetensors
+  - tokenizer_spm_32k_3.model
+```
+
+Therefore the `>0.5` goal is still not met. The next concrete gate is downloading or otherwise providing:
+
+```text
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/moshiko-pytorch-bf16/model.safetensors
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/moshiko-pytorch-bf16/tokenizer-e351c8d8-checkpoint125.safetensors
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/moshiko-pytorch-bf16/tokenizer_spm_32k_3.model
+```
+
+Only after this gate can we measure whether the Moshiko prior gets above `0.5` on the same clean held-out split, then decide whether to freeze/adapt it with video/text/speaker conditions.
+
+## 2026-06-02 Moshiko prior results and tokenizer-alignment control
+
+The Moshiko checkpoint gate was completed locally:
+
+```text
+local dir: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/moshiko-pytorch-bf16
+files:
+  model.safetensors                              ~15 GB
+  tokenizer-e351c8d8-checkpoint125.safetensors  367 MB
+  tokenizer_spm_32k_3.model                      540 KB
+```
+
+The download used the isolated `hf` CLI, disabled inherited proxy variables, and did not write pip cache under `/root`:
+
+```text
+root pip cache:      4.0K
+project pip cache:   156K
+project HF cache:    2.5K
+Moshiko local dir:   15G
+```
+
+### Direct Moshiko teacher-forced prior
+
+I ran the readiness-gated prior eval on the clean held-out split:
+
+```bash
+uv run python scripts/eval_moshiko_prior.py \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --code_cache_root data/mimi_code_cache_len120_220_12000 \
+  --n 20 \
+  --batch_size 1 \
+  --output_json eval_out/moshiko_prior_heldout_n20.json
+```
+
+Result:
+
+```text
+overall acc: 0.1124
+codebook0 acc: 0.2954
+```
+
+This is below the local AR codebook0 model. It is not evidence toward the `>0.5` target.
+
+I also tested a multi-stream diagnostic by mirroring the same audio codes into Moshi's user-stream inputs:
+
+```bash
+uv run python scripts/eval_moshiko_prior.py \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --code_cache_root data/moshiko_mimi_code_cache_len120_220_heldout \
+  --n 20 \
+  --batch_size 1 \
+  --mirror_user_streams \
+  --output_json eval_out/moshiko_prior_heldout_moshiko_mimi_mirror_user_n20.json
+```
+
+Result:
+
+```text
+overall acc: 0.0881
+codebook0 acc: 0.1391
+```
+
+This got worse. The direct Moshi dialogue-LM forward path is not a drop-in audio prior for the current visual-to-audio target.
+
+### Mimi tokenizer control
+
+I checked the tokenizer weights:
+
+```text
+project pretrained/mimi/model.safetensors SHA256:
+  bac7e85083dcded655d24eaadde7e6eea34c0da1b35fa2d284e641bd2b942a5e
+
+Moshiko tokenizer-e351c8d8-checkpoint125.safetensors SHA256:
+  09b782f0629851a271227fb9d36db65c041790365f11bbe5d3d59369cf863f50
+```
+
+Because these differ, I built a control cache with the Moshiko-bundled Mimi tokenizer:
+
+```bash
+uv run python scripts/build_moshiko_mimi_code_cache.py \
+  --clip_list configs/eval_splits/pretrain_len120_220_train12000_seed43.txt \
+  --data_root /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed \
+  --cache_root data/moshiko_mimi_code_cache_len120_220_12000 \
+  --device cuda
+
+uv run python scripts/build_moshiko_mimi_code_cache.py \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --data_root /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed \
+  --cache_root data/moshiko_mimi_code_cache_len120_220_12000 \
+  --device cuda
+```
+
+Cache size:
+
+```text
+clips cached: 13000
+disk: 209 MB
+```
+
+Then I reran the same regularized AR codebook0 experiment using that cache:
+
+```bash
+uv run python scripts/train_mimi_code_avsr.py \
+  --config configs/mimi_code_avsr_len120_220_12000_codebook0_ar_reg_moshiko_mimi.yaml
+```
+
+Validation curve:
+
+```text
+step  250: val_acc 0.3130, train_acc 0.3276
+step  500: val_acc 0.3444, train_acc 0.3629
+step  750: val_acc 0.3568, train_acc 0.3824
+step 1000: val_acc 0.3632, train_acc 0.3928
+step 1250: val_acc 0.3659, train_acc 0.4068
+step 1500: val_acc 0.3695, train_acc 0.4174
+step 1750: val_acc 0.3699, train_acc 0.4278
+step 2000: val_acc 0.3704, train_acc 0.4431
+step 2250: val_acc 0.3708, train_acc 0.4543
+step 2500: val_acc 0.3700, train_acc 0.4699
+```
+
+Best:
+
+```text
+best val_acc: 0.37081471 @ step 2250
+run: runs/mimi_code_avsr/len120_220_12000_codebook0_ar_reg_moshiko_mimi_v1
+```
+
+This is only a tiny numerical improvement over the previous clean AR best (`0.37006474`). It confirms that the `~0.37` plateau is not caused by using the wrong Mimi tokenizer.
+
+### Updated conclusion
+
+The active goal remains unmet:
+
+```text
+target: clean held-out validation accuracy > 0.5
+best verified clean held-out val_acc: 0.37081471
+gap to target: ~0.1292 absolute
+```
+
+The new evidence rules out three more easy explanations:
+
+```text
+1. Missing Moshiko weights: fixed, but direct Moshiko prior is not sufficient.
+2. Mimi tokenizer mismatch: controlled, but AR still plateaus at ~0.37.
+3. User-stream mirroring in Moshi: tested, worse.
+```
+
+The next meaningful path is no longer "try another small codebook head." It should be an architecture change that directly uses video as a conditioning signal inside a pretrained speech/token generator, or a teacher-distillation route that optimizes perceptual/ASR quality rather than Mimi top-1 accuracy alone.
+
+## 2026-06-02 AR cross-attention control
+
+I tested whether the local AR code head was failing because video was only injected by adding downsampled `avsr_enc[:, ::2]` features. I added:
+
+```text
+condition_mode: video_spk_crossattn
+```
+
+Behavior:
+
+```text
+1. The AR code-token stream remains causal over previous Mimi codebook0 tokens.
+2. The full `avsr_enc` frame sequence is projected separately.
+3. After each causal self-attention block, the code stream cross-attends to the full video-frame sequence.
+4. Speaker embedding is still added as a global condition.
+```
+
+Test coverage:
+
+```text
+tests/test_mimi_code_avsr.py:
+  test_ar_mimi_code_head_cross_attends_video_frames
+```
+
+The test specifically changes only odd-indexed video frames, which the old `enc[:, ::2]` path ignored. The new cross-attention path changes logits under that perturbation, confirming that full-frame video context is reachable.
+
+Config:
+
+```bash
+configs/mimi_code_avsr_len120_220_12000_codebook0_ar_crossattn_moshiko_mimi.yaml
+```
+
+Run:
+
+```text
+runs/mimi_code_avsr/len120_220_12000_codebook0_ar_crossattn_moshiko_mimi_v1
+```
+
+Validation curve:
+
+```text
+step  250: val_acc 0.3196, train_acc 0.3309
+step  500: val_acc 0.3466, train_acc 0.3676
+step  750: val_acc 0.3592, train_acc 0.3889
+step 1000: val_acc 0.3651, train_acc 0.4036
+step 1250: val_acc 0.3689, train_acc 0.4252
+step 1500: val_acc 0.3698, train_acc 0.4482
+step 1750: val_acc 0.3687, train_acc 0.4597
+step 2000: val_acc 0.3662, train_acc 0.4833
+step 2250: val_acc 0.3661, train_acc 0.5123
+step 2500: val_acc 0.3623, train_acc 0.5321
+```
+
+Best:
+
+```text
+best val_acc: 0.36980473 @ step 1500
+```
+
+Comparison:
+
+```text
+non-cross-attn Moshiko-Mimi AR best: 0.37081471
+cross-attn Moshiko-Mimi AR best:     0.36980473
+```
+
+Conclusion:
+
+```text
+Frame-level video cross-attention does not break the ~0.37 clean held-out plateau.
+It increases training accuracy faster, but validation drops after step 1500.
+This supports the same diagnosis as the larger/no-reg AR run: the current condition signal and small supervised head can overfit, but do not generalize enough for >0.5.
+```

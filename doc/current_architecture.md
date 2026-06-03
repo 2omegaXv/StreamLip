@@ -1,8 +1,84 @@
 # StreamLip 当前代码架构说明
 
-更新时间：2026-05-31
+更新时间：2026-06-03
 
-本文档描述当前 worktree 中的最新实际代码状态。重点结论是：当前最新主线已经不是一个在线端到端的 `video -> text -> audio` 系统，而是一个以预提取 Auto-AVSR 与 SmolLM2 特征为条件的独立 FM 声码器头训练路线。
+本文档描述当前 worktree 中的最新实际代码状态。重点结论是：当前项目同时保留 FM latent 生成路线和离散 Mimi codebook 诊断路线；截至 2026-06-03，验证集准确率最高的是 `AR Mimi codebook0 + top5 Viterbi bigram decoding`，不是原始 FM latent head。
+
+## 0. 当前最佳验证路径：AR Mimi codebook0 + Viterbi 解码
+
+截至 2026-06-03，验证集准确率最高的路线是离散 Mimi `codebook=0` 的 AR token 预测与序列级解码后处理。
+
+当前最佳路径：
+
+```text
+processed clip
+  ├─ avsr_enc.npy                         Auto-AVSR frame feature
+  ├─ speaker_emb.npy                      speaker condition
+  ├─ smollm2_h_text_json.npy              text.json transcript 的 SmolLM2 hidden
+  └─ Mimi code cache / codebook0 target
+
+AR MimiCodeHead
+  ├─ previous ground-truth codebook0 token embedding
+  ├─ downsampled AVSR feature
+  ├─ speaker embedding
+  └─ text_json hidden cross-attention
+
+per-frame logits over 2048 codebook0 tokens
+  └─ top5 candidates per frame
+      └─ Viterbi decode with train-only bigram prior
+          └─ final codebook0 token sequence
+```
+
+核心文件：
+
+```text
+scripts/train_mimi_code_avsr.py      AR Mimi codebook0 训练入口
+scripts/eval_mimi_code_viterbi.py    top-k + bigram Viterbi 验证入口
+tests/test_mimi_code_viterbi.py      Viterbi 解码单元测试
+```
+
+最佳已验证结果：
+
+```text
+base checkpoint:
+  runs/mimi_code_avsr/len80_260_65802_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi_lr3e5_ft_from16k/step_018000.pt
+
+full held-out:
+  val clips: 1000
+  tokens: 161,967
+  train/val overlap: 0
+
+base top1 acc:       0.4724
+top5 candidate acc:  0.8012
+Viterbi best acc:    0.5136
+best alpha:          0.6
+```
+
+复现命令：
+
+```bash
+PYTHONUNBUFFERED=1 env -u all_proxy -u ALL_PROXY -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+  HF_HOME=$PWD/.cache/huggingface \
+  TRANSFORMERS_CACHE=$PWD/.cache/huggingface \
+  TORCH_HOME=$PWD/.cache/torch \
+  UV_CACHE_DIR=$PWD/.cache/uv \
+  PIP_CACHE_DIR=$PWD/.cache/pip \
+  uv run python scripts/eval_mimi_code_viterbi.py \
+    --base_run runs/mimi_code_avsr/len80_260_65802_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi_lr3e5_ft_from16k \
+    --base_ckpt runs/mimi_code_avsr/len80_260_65802_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi_lr3e5_ft_from16k/step_018000.pt \
+    --topk 5 \
+    --alphas 0,0.2,0.4,0.6,0.8,1.0 \
+    --bigram_smoothing 0.05 \
+    --output_json runs/mimi_code_avsr/viterbi_bigram_heldout_step18000.json \
+    --progress_every 100
+```
+
+边界说明：
+
+- 这个 `>0.5` 是离散 Mimi `codebook=0` 的验证集 top-1 accuracy。
+- base neural model 单独仍是 `~0.472`，超过 `0.5` 的增益来自 top5 候选上的序列级 bigram Viterbi 解码。
+- 这还不是完整的多 codebook 音频生成系统，也不是端到端 `video -> audio` 推理闭环。
+- 它证明当前模型的正确 token 经常已经进入 top-k，下一步应围绕更强音频 token prior、跨 codebook prior 或可学习序列解码器推进。
 
 ## 1. 当前最新主线：FM-AVSR
 
