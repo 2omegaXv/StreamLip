@@ -205,6 +205,7 @@ class FMHead(nn.Module):
         use_text_token_cross_attn: bool = False,
         extra_cond_dim: int = 0,
         timbre_condition_dim: int = 0,
+        audio_prompt_dim: int = 0,
         ctc_vocab_size: int = 0,
         ctc_topk: int = 0,
         ctc_token_emb_dim: int = 0,
@@ -214,6 +215,7 @@ class FMHead(nn.Module):
         self.use_text_token_cross_attn = use_text_token_cross_attn
         self.extra_cond_dim = extra_cond_dim
         self.timbre_condition_dim = timbre_condition_dim
+        self.audio_prompt_dim = audio_prompt_dim
         self.ctc_topk = ctc_topk
         self.ctc_token_emb_dim = ctc_token_emb_dim
         ctc_cond_dim = ctc_token_emb_dim + ctc_topk if ctc_topk > 0 else 0
@@ -228,6 +230,9 @@ class FMHead(nn.Module):
         )  # condition → 512
         self.cond_token_proj = nn.Linear(self.DIM, self.DIM)
         self.text_token_proj = nn.Linear(960, self.DIM)
+        self.audio_prompt_proj = (
+            nn.Linear(audio_prompt_dim, self.DIM) if audio_prompt_dim > 0 else None
+        )
         self.extra_pred_head = None
         if extra_cond_dim > 0:
             self.extra_pred_head = nn.Sequential(
@@ -254,6 +259,7 @@ class FMHead(nn.Module):
         id_vec:   torch.Tensor,   # (B, 256)
         timbre_cond: torch.Tensor | None = None,  # (B, timbre_condition_dim)
         text_tokens: torch.Tensor | None = None,  # (B, L, 960)
+        audio_prompt: torch.Tensor | None = None,  # (B, T_prompt, audio_prompt_dim)
         extra_cond: torch.Tensor | None = None,  # (B, T_a, extra_cond_dim)
         ctc_topk_ids: torch.Tensor | None = None,  # (B, T_a, K)
         ctc_topk_probs: torch.Tensor | None = None,  # (B, T_a, K)
@@ -314,11 +320,27 @@ class FMHead(nn.Module):
             parts.extend([weighted_emb, ctc_topk_probs])
         cat = torch.cat(parts, dim=-1)
         cond = self.cond_proj(cat)
-        if not self.use_text_token_cross_attn:
+        cond_tokens = None
+        if self.use_text_token_cross_attn and text_tokens is not None:
+            cond_tokens = self.text_token_proj(text_tokens.to(dtype=cond.dtype))
+        if self.audio_prompt_dim > 0 and audio_prompt is not None:
+            if audio_prompt.ndim != 3:
+                raise ValueError("audio_prompt shape must be (B, T_prompt, audio_prompt_dim)")
+            if audio_prompt.shape[0] != vis_down.shape[0] or audio_prompt.shape[-1] != self.audio_prompt_dim:
+                raise ValueError(
+                    f"audio_prompt shape must be (B, T_prompt, {self.audio_prompt_dim}), "
+                    f"got {tuple(audio_prompt.shape)}"
+                )
+            prompt_tokens = self.audio_prompt_proj(
+                audio_prompt.to(device=cond.device, dtype=cond.dtype)
+            )
+            cond_tokens = (
+                prompt_tokens if cond_tokens is None
+                else torch.cat([cond_tokens, prompt_tokens], dim=1)
+            )
+        if cond_tokens is None:
             return cond
-        if text_tokens is None:
-            return cond, None
-        return cond, self.text_token_proj(text_tokens.to(dtype=cond.dtype))
+        return cond, cond_tokens
 
     def _forward_dit(
         self,
@@ -355,6 +377,7 @@ class FMHead(nn.Module):
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
         timbre_cond: torch.Tensor | None = None,
+        audio_prompt: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
@@ -363,6 +386,7 @@ class FMHead(nn.Module):
             vis_down, h_down, id_vec,
             timbre_cond=timbre_cond,
             text_tokens=text_tokens,
+            audio_prompt=audio_prompt,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,
@@ -371,7 +395,25 @@ class FMHead(nn.Module):
             cond, cond_tokens = built
         else:
             cond, cond_tokens = built, None
-        cond_token_mask = text_token_mask if cond_tokens is not None else None
+        cond_token_mask = None
+        if (
+            cond_tokens is not None
+            and text_token_mask is not None
+            and self.use_text_token_cross_attn
+        ):
+            prompt_len = 0
+            if self.audio_prompt_dim > 0 and audio_prompt is not None:
+                prompt_len = audio_prompt.shape[1]
+            if prompt_len > 0:
+                prompt_mask = torch.ones(
+                    text_token_mask.shape[0],
+                    prompt_len,
+                    device=text_token_mask.device,
+                    dtype=torch.bool,
+                )
+                cond_token_mask = torch.cat([text_token_mask, prompt_mask], dim=1)
+            else:
+                cond_token_mask = text_token_mask
         return cond, cond_tokens, cond_token_mask
 
     def predict_extra_condition(
@@ -381,6 +423,7 @@ class FMHead(nn.Module):
         id_vec: torch.Tensor,
         text_tokens: torch.Tensor | None = None,
         timbre_cond: torch.Tensor | None = None,
+        audio_prompt: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -400,6 +443,7 @@ class FMHead(nn.Module):
             id_vec,
             text_tokens=text_tokens,
             timbre_cond=timbre_cond,
+            audio_prompt=audio_prompt,
             extra_cond=zeros,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,
@@ -417,6 +461,7 @@ class FMHead(nn.Module):
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
         timbre_cond: torch.Tensor | None = None,
+        audio_prompt: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
@@ -430,6 +475,7 @@ class FMHead(nn.Module):
             text_tokens=text_tokens,
             text_token_mask=text_token_mask,
             timbre_cond=timbre_cond,
+            audio_prompt=audio_prompt,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,
@@ -451,6 +497,7 @@ class FMHead(nn.Module):
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
         timbre_cond: torch.Tensor | None = None,
+        audio_prompt: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
@@ -461,6 +508,7 @@ class FMHead(nn.Module):
             text_tokens=text_tokens,
             text_token_mask=text_token_mask,
             timbre_cond=timbre_cond,
+            audio_prompt=audio_prompt,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,
@@ -479,6 +527,7 @@ class FMHead(nn.Module):
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
         timbre_cond: torch.Tensor | None = None,
+        audio_prompt: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
@@ -490,6 +539,7 @@ class FMHead(nn.Module):
             text_tokens=text_tokens,
             text_token_mask=text_token_mask,
             timbre_cond=timbre_cond,
+            audio_prompt=audio_prompt,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,
@@ -510,6 +560,7 @@ class FMHead(nn.Module):
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
         timbre_cond: torch.Tensor | None = None,
+        audio_prompt: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
@@ -520,6 +571,7 @@ class FMHead(nn.Module):
             text_tokens=text_tokens,
             text_token_mask=text_token_mask,
             timbre_cond=timbre_cond,
+            audio_prompt=audio_prompt,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,
@@ -545,6 +597,7 @@ class FMHead(nn.Module):
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
         timbre_cond: torch.Tensor | None = None,
+        audio_prompt: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
@@ -555,6 +608,7 @@ class FMHead(nn.Module):
             text_tokens=text_tokens,
             text_token_mask=text_token_mask,
             timbre_cond=timbre_cond,
+            audio_prompt=audio_prompt,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,

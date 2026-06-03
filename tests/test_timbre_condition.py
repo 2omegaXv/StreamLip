@@ -44,6 +44,37 @@ class TimbreConditionTest(unittest.TestCase):
 
         self.assertEqual(tuple(out.shape), (2, 4, 512))
 
+    def test_fm_head_accepts_audio_prompt_tokens_and_keeps_output_shape(self):
+        fm = FMHeadAVSR(n_layers=1, use_cross_attn=True, audio_prompt_dim=512)
+        v = torch.zeros(2, 4, 768)
+        h = torch.zeros(2, 4, 960)
+        spk = torch.zeros(2, 256)
+        prompt = torch.ones(2, 3, 512)
+
+        out = fm.reconstruct_from_cond(v, h, spk, audio_prompt=prompt)
+
+        self.assertEqual(tuple(out.shape), (2, 4, 512))
+
+    def test_audio_prompt_cross_attention_ignores_text_mask_without_text_token_cross_attention(self):
+        fm = FMHeadAVSR(n_layers=1, use_cross_attn=True, audio_prompt_dim=512)
+        v = torch.zeros(2, 4, 768)
+        h = torch.zeros(2, 4, 960)
+        spk = torch.zeros(2, 256)
+        text_tokens = torch.zeros(2, 5, 960)
+        text_mask = torch.ones(2, 5, dtype=torch.bool)
+        prompt = torch.ones(2, 3, 512)
+
+        out = fm.reconstruct_from_cond(
+            v,
+            h,
+            spk,
+            text_tokens=text_tokens,
+            text_token_mask=text_mask,
+            audio_prompt=prompt,
+        )
+
+        self.assertEqual(tuple(out.shape), (2, 4, 512))
+
 
 if __name__ == "__main__":
     unittest.main()

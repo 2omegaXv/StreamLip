@@ -241,6 +241,7 @@ class FMAVSRDataset(Dataset):
         text_source: str = "avsr",
         visual_feature_name: str = "avsr_enc.npy",
         timbre_condition_name: str | None = None,
+        audio_prompt_frames: int = 0,
         load_energy: bool = False,
     ):
         root = Path(processed_root)
@@ -278,6 +279,7 @@ class FMAVSRDataset(Dataset):
         self.text_source = text_source
         self.visual_feature_name = visual_feature_name
         self.timbre_condition_name = timbre_condition_name
+        self.audio_prompt_frames = max(int(audio_prompt_frames), 0)
         self.load_energy = load_energy
         print(f"[FMAVSRDataset] split={split}/{subset}  clips={len(self.clips)}")
 
@@ -299,6 +301,13 @@ class FMAVSRDataset(Dataset):
         timbre_cond = None
         if self.timbre_condition_name:
             timbre_cond = np.load(str(c / self.timbre_condition_name)).astype("float32")
+        audio_prompt = None
+        if self.audio_prompt_frames > 0:
+            audio_prompt = np.zeros(
+                (self.audio_prompt_frames, lat.shape[1]), dtype=np.float32
+            )
+            n_prompt = min(self.audio_prompt_frames, lat.shape[0])
+            audio_prompt[:n_prompt] = lat[:n_prompt]
         energy = (
             load_log_rms_energy(c, lat.shape[0]).astype("float32")
             if self.load_energy else None
@@ -321,6 +330,8 @@ class FMAVSRDataset(Dataset):
         }
         if timbre_cond is not None:
             item["timbre_cond"] = timbre_cond
+        if audio_prompt is not None:
+            item["audio_prompt"] = audio_prompt
         if energy is not None:
             item["energy"] = energy
         return item
@@ -340,6 +351,10 @@ def collate_fn(batch):
     spk    = np.stack([b["speaker"] for b in batch])   # (B, 256)
     has_timbre = all(b.get("timbre_cond") is not None for b in batch)
     timbre_cond = np.stack([b["timbre_cond"] for b in batch]) if has_timbre else None
+    has_audio_prompt = all(b.get("audio_prompt") is not None for b in batch)
+    audio_prompt = (
+        np.stack([b["audio_prompt"] for b in batch]) if has_audio_prompt else None
+    )
     texts  = [b["text"] for b in batch]
     has_lm_idx = all(b.get("lm_idx") is not None for b in batch)
     lm_idx = np.zeros((B, max_Ta), dtype=np.int64) if has_lm_idx else None
@@ -372,4 +387,6 @@ def collate_fn(batch):
         out["energy"] = energy
     if has_timbre:
         out["timbre_cond"] = timbre_cond
+    if has_audio_prompt:
+        out["audio_prompt"] = audio_prompt
     return out

@@ -60,6 +60,38 @@ class FMAVSRDatasetTest(unittest.TestCase):
             self.assertEqual(batch["timbre_cond"].shape, (1, 1024))
             self.assertAlmostEqual(float(batch["timbre_cond"][0, 17]), 17.0)
 
+    def test_dataset_builds_audio_prompt_from_normalized_prefix_and_collates_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clip = root / "pretrain" / "spk" / "00001"
+            clip.mkdir(parents=True)
+            (clip / "avsr_text.txt").write_text("PROMPT\n")
+            np.save(clip / "avsr_enc.npy", np.ones((8, 768), dtype=np.float32))
+            latent = np.arange(4 * 512, dtype=np.float32).reshape(4, 512)
+            np.savez(clip / "latent.npz", latent=latent)
+            np.save(clip / "speaker_emb.npy", np.ones((256,), dtype=np.float32))
+            np.save(clip / "smollm2_h.npy", np.ones((1, 960), dtype=np.float16))
+            np.savez(
+                root / "latent_norm_stats.npz",
+                mean=np.ones((512,), dtype=np.float32),
+                std=np.full((512,), 2.0, dtype=np.float32),
+            )
+            clip_list = root / "clips.txt"
+            clip_list.write_text("pretrain/spk/00001\n")
+
+            ds = FMAVSRDataset(
+                str(root),
+                clip_list=str(clip_list),
+                audio_prompt_frames=3,
+            )
+            item = ds[0]
+            batch = collate_fn([item])
+
+            expected = (latent[:3] - 1.0) / 2.0
+            self.assertEqual(item["audio_prompt"].shape, (3, 512))
+            self.assertEqual(batch["audio_prompt"].shape, (1, 3, 512))
+            np.testing.assert_allclose(batch["audio_prompt"][0], expected)
+
     def test_read_clip_text_can_use_text_json_words(self):
         with tempfile.TemporaryDirectory() as tmp:
             clip = Path(tmp)
@@ -499,6 +531,22 @@ class FMAVSRDatasetTest(unittest.TestCase):
 
         self.assertEqual(tuple(timbre_cond.shape), (1, 1024))
         self.assertTrue(torch.allclose(timbre_cond[0, :3].float(), torch.tensor([0.0, 1.0, 2.0])))
+
+    def test_prepare_conditions_returns_audio_prompt_when_present(self):
+        batch = {
+            "enc": np.ones((1, 6, 768), dtype=np.float32),
+            "latent": np.zeros((1, 3, 512), dtype=np.float32),
+            "latent_lens": np.array([3], dtype=np.int64),
+            "speaker": np.ones((1, 256), dtype=np.float32),
+            "h_lm": None,
+            "lens_L": None,
+            "audio_prompt": np.ones((1, 2, 512), dtype=np.float32),
+        }
+
+        prepared = prepare_conditions(batch, "cpu")
+        audio_prompt = prepared[8]
+
+        self.assertEqual(tuple(audio_prompt.shape), (1, 2, 512))
 
     def test_prepare_conditions_can_shuffle_text_with_fixed_permutation(self):
         batch = {

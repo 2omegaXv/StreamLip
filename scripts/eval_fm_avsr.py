@@ -47,6 +47,7 @@ class FMHeadAVSR(_FMBase):
         use_text_token_cross_attn=False,
         extra_cond_dim=0,
         timbre_condition_dim=0,
+        audio_prompt_dim=0,
         ctc_vocab_size=0,
         ctc_topk=0,
         ctc_token_emb_dim=0,
@@ -58,6 +59,7 @@ class FMHeadAVSR(_FMBase):
             use_text_token_cross_attn=use_text_token_cross_attn,
             extra_cond_dim=extra_cond_dim,
             timbre_condition_dim=timbre_condition_dim,
+            audio_prompt_dim=audio_prompt_dim,
             ctc_vocab_size=ctc_vocab_size,
             ctc_topk=ctc_topk,
             ctc_token_emb_dim=ctc_token_emb_dim,
@@ -134,6 +136,10 @@ def parse_args():
                    help="Optional per-clip global timbre condition file, e.g. timbre_cond.npy.")
     p.add_argument("--timbre_condition_dim", type=int, default=0,
                    help="Dimension of the optional global timbre condition vector.")
+    p.add_argument("--audio_prompt_frames", type=int, default=0,
+                   help="Use this many normalized Mimi prefix frames as audio prompt tokens.")
+    p.add_argument("--audio_prompt_dim", type=int, default=0,
+                   help="Dimension of each audio prompt token; usually 512 for Mimi latent.")
     p.add_argument("--ctc_condition_mode",
                    choices=[
                        "none",
@@ -187,6 +193,7 @@ def parse_args():
         config_keys = {"data_root", "mimi_path", "smollm2_path", "split", "clip_list",
                        "no_text_cond", "condition_mode", "text_alignment_mode", "text_source",
                        "visual_feature_name", "timbre_condition_name", "timbre_condition_dim",
+                       "audio_prompt_frames", "audio_prompt_dim",
                        "ctc_condition_mode", "auto_avsr_ckpt", "ctc_vocab_size",
                        "ctc_topk", "ctc_token_emb_dim", "energy_condition_mode",
                        "n_dit_layers", "use_cross_attn", "use_text_token_cross_attn",
@@ -333,6 +340,7 @@ def main():
             + energy_extra_dim(args.energy_condition_mode)
         ),
         timbre_condition_dim=args.timbre_condition_dim,
+        audio_prompt_dim=args.audio_prompt_dim,
         ctc_vocab_size=args.ctc_vocab_size,
         ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
         ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -352,6 +360,7 @@ def main():
                 + energy_extra_dim(args.energy_condition_mode)
             ),
             timbre_condition_dim=args.timbre_condition_dim,
+            audio_prompt_dim=args.audio_prompt_dim,
             ctc_vocab_size=args.ctc_vocab_size,
             ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
             ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -381,6 +390,7 @@ def main():
         text_alignment_mode=args.text_alignment_mode,
         text_source=args.text_source,
         timbre_condition_name=args.timbre_condition_name,
+        audio_prompt_frames=args.audio_prompt_frames,
     )
     clips = ds.clips[:args.n]
     print(f"Evaluating {len(clips)} clips → {out_dir}\n")
@@ -407,6 +417,19 @@ def main():
             if args.timbre_condition_name:
                 timbre = np.load(str(cond_c / args.timbre_condition_name)).astype("float32")
                 timbre_t = torch.from_numpy(timbre).to(device, dtype=torch.bfloat16).unsqueeze(0)
+            audio_prompt = None
+            if args.audio_prompt_frames > 0:
+                cond_lat = np.load(str(cond_c / "latent.npz"))["latent"].astype("float32")
+                cond_lat = validate_latent_frame_rate(cond_lat, enc.shape[0], cond_c)
+                cond_lat = normalize_latent(cond_lat)
+                prompt_np = np.zeros(
+                    (args.audio_prompt_frames, cond_lat.shape[1]), dtype=np.float32
+                )
+                n_prompt = min(args.audio_prompt_frames, cond_lat.shape[0])
+                prompt_np[:n_prompt] = cond_lat[:n_prompt]
+                audio_prompt = torch.from_numpy(prompt_np).to(
+                    device, dtype=torch.bfloat16
+                ).unsqueeze(0)
 
             T_a = min(lat_gt.shape[0], _MAX_TA)
 
@@ -469,6 +492,7 @@ def main():
                 pred_energy = predict_energy_condition(
                     fm, residual_base, v_down, h_down, spk_t,
                     timbre_cond=timbre_t,
+                    audio_prompt=audio_prompt,
                     text_tokens=text_tokens,
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
@@ -484,6 +508,7 @@ def main():
                     text_tokens=text_tokens,
                     text_token_mask=text_token_mask,
                     timbre_cond=timbre_t,
+                    audio_prompt=audio_prompt,
                     extra_cond=extra_cond,
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
@@ -494,6 +519,7 @@ def main():
                         text_tokens=text_tokens,
                         text_token_mask=text_token_mask,
                         timbre_cond=timbre_t,
+                        audio_prompt=audio_prompt,
                         extra_cond=extra_cond,
                         ctc_topk_ids=ctc_ids,
                         ctc_topk_probs=ctc_probs,
@@ -514,6 +540,7 @@ def main():
                     text_tokens=text_tokens,
                     text_token_mask=text_token_mask,
                     timbre_cond=timbre_t,
+                    audio_prompt=audio_prompt,
                     extra_cond=extra_cond,
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
@@ -524,6 +551,7 @@ def main():
                     text_tokens=text_tokens,
                     text_token_mask=text_token_mask,
                     timbre_cond=timbre_t,
+                    audio_prompt=audio_prompt,
                     extra_cond=extra_cond,
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,

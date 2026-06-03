@@ -45,6 +45,7 @@ class FMHeadAVSR(_FMBase):
         use_text_token_cross_attn=False,
         extra_cond_dim=0,
         timbre_condition_dim=0,
+        audio_prompt_dim=0,
         ctc_vocab_size=0,
         ctc_topk=0,
         ctc_token_emb_dim=0,
@@ -56,6 +57,7 @@ class FMHeadAVSR(_FMBase):
             use_text_token_cross_attn=use_text_token_cross_attn,
             extra_cond_dim=extra_cond_dim,
             timbre_condition_dim=timbre_condition_dim,
+            audio_prompt_dim=audio_prompt_dim,
             ctc_vocab_size=ctc_vocab_size,
             ctc_topk=ctc_topk,
             ctc_token_emb_dim=ctc_token_emb_dim,
@@ -122,6 +124,10 @@ def parse_args():
                    help="Optional per-clip global timbre condition file, e.g. timbre_cond.npy.")
     p.add_argument("--timbre_condition_dim", type=int, default=0,
                    help="Dimension of the optional global timbre condition vector.")
+    p.add_argument("--audio_prompt_frames", type=int, default=0,
+                   help="Use this many normalized Mimi prefix frames as audio prompt tokens.")
+    p.add_argument("--audio_prompt_dim", type=int, default=0,
+                   help="Dimension of each audio prompt token; usually 512 for Mimi latent.")
     p.add_argument("--ctc_condition_mode",
                    choices=[
                        "none",
@@ -349,6 +355,7 @@ def predict_energy_condition(
     h_down: torch.Tensor,
     spk: torch.Tensor,
     timbre_cond: torch.Tensor | None = None,
+    audio_prompt: torch.Tensor | None = None,
     text_tokens: torch.Tensor | None = None,
     ctc_topk_ids: torch.Tensor | None = None,
     ctc_topk_probs: torch.Tensor | None = None,
@@ -359,6 +366,7 @@ def predict_energy_condition(
         h_down,
         spk,
         timbre_cond=timbre_cond,
+        audio_prompt=audio_prompt,
         text_tokens=text_tokens,
         ctc_topk_ids=ctc_topk_ids,
         ctc_topk_probs=ctc_topk_probs,
@@ -446,6 +454,9 @@ def prepare_conditions(
     timbre_cond = None
     if batch.get("timbre_cond") is not None:
         timbre_cond = torch.from_numpy(batch["timbre_cond"]).to(device, dtype=torch.bfloat16)
+    audio_prompt = None
+    if batch.get("audio_prompt") is not None:
+        audio_prompt = torch.from_numpy(batch["audio_prompt"]).to(device, dtype=torch.bfloat16)
     B, T_a = lat_gt.shape[:2]
 
     v_down = enc[:, ::2, :][:, :T_a, :]
@@ -551,6 +562,7 @@ def prepare_conditions(
         text_tokens,
         text_token_mask,
         timbre_cond,
+        audio_prompt,
         extra_cond,
         ctc_topk_ids,
         ctc_topk_probs,
@@ -715,6 +727,7 @@ def main():
             + energy_extra_dim(args.energy_condition_mode)
         ),
         timbre_condition_dim=args.timbre_condition_dim,
+        audio_prompt_dim=args.audio_prompt_dim,
         ctc_vocab_size=args.ctc_vocab_size,
         ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
         ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -739,6 +752,7 @@ def main():
                 + energy_extra_dim(args.energy_condition_mode)
             ),
             timbre_condition_dim=args.timbre_condition_dim,
+            audio_prompt_dim=args.audio_prompt_dim,
             ctc_vocab_size=args.ctc_vocab_size,
             ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
             ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -784,6 +798,7 @@ def main():
         text_source=args.text_source,
         visual_feature_name=args.visual_feature_name,
         timbre_condition_name=args.timbre_condition_name,
+        audio_prompt_frames=args.audio_prompt_frames,
         load_energy=mode_uses_energy_supervision(args.energy_condition_mode),
     )
     if args.val_clip_list:
@@ -795,6 +810,7 @@ def main():
             text_source=args.text_source,
             visual_feature_name=args.visual_feature_name,
             timbre_condition_name=args.timbre_condition_name,
+            audio_prompt_frames=args.audio_prompt_frames,
             load_energy=mode_uses_energy_supervision(args.energy_condition_mode),
         )
         train_n = len(train_ds)
@@ -875,6 +891,7 @@ def main():
                     text_tokens,
                     text_mask,
                     timbre_cond,
+                    audio_prompt,
                     extra_cond,
                     ctc_ids,
                     ctc_probs,
@@ -892,6 +909,7 @@ def main():
                         pred_energy = predict_energy_condition(
                             fm, residual_base, v_down, h_down, spk,
                             timbre_cond=timbre_cond,
+                            audio_prompt=audio_prompt,
                             text_tokens=text_tokens,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -907,6 +925,7 @@ def main():
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
                             timbre_cond=timbre_cond,
+                            audio_prompt=audio_prompt,
                             extra_cond=extra_cond,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -923,6 +942,7 @@ def main():
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
                             timbre_cond=timbre_cond,
+                            audio_prompt=audio_prompt,
                             extra_cond=extra_cond,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -934,6 +954,7 @@ def main():
                                     text_tokens=text_tokens,
                                     text_token_mask=text_mask,
                                     timbre_cond=timbre_cond,
+                                    audio_prompt=audio_prompt,
                                     extra_cond=extra_cond.detach(),
                                     ctc_topk_ids=ctc_ids,
                                     ctc_topk_probs=ctc_probs,
@@ -972,6 +993,7 @@ def main():
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
                             timbre_cond=timbre_cond,
+                            audio_prompt=audio_prompt,
                             extra_cond=extra_cond,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -989,6 +1011,7 @@ def main():
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
                             timbre_cond=timbre_cond,
+                            audio_prompt=audio_prompt,
                             extra_cond=extra_cond,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -1101,6 +1124,7 @@ def main():
                                 text_tokens_v,
                                 text_mask_v,
                                 timbre_v,
+                                audio_prompt_v,
                                 extra_v,
                                 ctc_ids_v,
                                 ctc_probs_v,
@@ -1115,6 +1139,7 @@ def main():
                                 pred_energy_v = predict_energy_condition(
                                     fm, residual_base, vd_v, hd_v, spk_v,
                                     timbre_cond=timbre_v,
+                                    audio_prompt=audio_prompt_v,
                                     text_tokens=text_tokens_v,
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
@@ -1132,6 +1157,7 @@ def main():
                                     text_tokens=text_tokens_v,
                                     text_token_mask=text_mask_v,
                                     timbre_cond=timbre_v,
+                                    audio_prompt=audio_prompt_v,
                                     extra_cond=extra_v,
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
@@ -1141,6 +1167,7 @@ def main():
                                 text_tokens=text_tokens_v,
                                 text_token_mask=text_mask_v,
                                 timbre_cond=timbre_v,
+                                audio_prompt=audio_prompt_v,
                                 extra_cond=extra_v,
                                 ctc_topk_ids=ctc_ids_v,
                                 ctc_topk_probs=ctc_probs_v,
@@ -1151,6 +1178,7 @@ def main():
                                     text_tokens=text_tokens_v,
                                     text_token_mask=text_mask_v,
                                     timbre_cond=timbre_v,
+                                    audio_prompt=audio_prompt_v,
                                     extra_cond=extra_v,
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
@@ -1179,6 +1207,7 @@ def main():
                                     text_tokens=text_tokens_v,
                                     text_token_mask=text_mask_v,
                                     timbre_cond=timbre_v,
+                                    audio_prompt=audio_prompt_v,
                                     extra_cond=extra_v,
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
@@ -1196,6 +1225,7 @@ def main():
                                     text_tokens=text_tokens_v,
                                     text_token_mask=text_mask_v,
                                     timbre_cond=timbre_v,
+                                    audio_prompt=audio_prompt_v,
                                     extra_cond=extra_v,
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
@@ -1219,6 +1249,7 @@ def main():
                             train_pred_energy = predict_energy_condition(
                                 fm, residual_base, v_down, h_down, spk,
                                 timbre_cond=timbre_cond,
+                                audio_prompt=audio_prompt,
                                 text_tokens=text_tokens,
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
@@ -1236,6 +1267,7 @@ def main():
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
                             timbre_cond=timbre_cond,
+                            audio_prompt=audio_prompt,
                             extra_cond=train_extra_cond,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -1246,6 +1278,7 @@ def main():
                                 text_tokens=text_tokens,
                                 text_token_mask=text_mask,
                                 timbre_cond=timbre_cond,
+                                audio_prompt=audio_prompt,
                                 extra_cond=train_extra_cond,
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
@@ -1272,6 +1305,7 @@ def main():
                                 text_tokens=text_tokens,
                                 text_token_mask=text_mask,
                                 timbre_cond=timbre_cond,
+                                audio_prompt=audio_prompt,
                                 extra_cond=train_extra_cond,
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
@@ -1289,6 +1323,7 @@ def main():
                                 text_tokens=text_tokens,
                                 text_token_mask=text_mask,
                                 timbre_cond=timbre_cond,
+                                audio_prompt=audio_prompt,
                                 extra_cond=train_extra_cond,
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
