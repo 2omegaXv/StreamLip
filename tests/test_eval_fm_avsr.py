@@ -38,6 +38,15 @@ class EvalFMAVSRTest(unittest.TestCase):
         self.assertAlmostEqual(metrics["mse"], 0.0)
         self.assertAlmostEqual(metrics["mae"], 0.0)
 
+    def test_latent_metrics_can_skip_prompt_frames(self):
+        pred = np.array([[100.0], [2.0], [3.0]], dtype=np.float32)
+        target = np.array([[-100.0], [2.0], [3.0]], dtype=np.float32)
+
+        metrics = latent_metrics(pred, target, start_frame=1)
+
+        self.assertAlmostEqual(metrics["mse"], 0.0)
+        self.assertAlmostEqual(metrics["corr"], 1.0)
+
     def test_parse_args_exposes_metrics_only_default(self):
         old_argv = sys.argv
         try:

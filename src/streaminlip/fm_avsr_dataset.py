@@ -240,6 +240,7 @@ class FMAVSRDataset(Dataset):
         text_alignment_mode: str = "uniform",
         text_source: str = "avsr",
         visual_feature_name: str = "avsr_enc.npy",
+        timbre_condition_name: str | None = None,
         load_energy: bool = False,
     ):
         root = Path(processed_root)
@@ -276,6 +277,7 @@ class FMAVSRDataset(Dataset):
         self.text_alignment_mode = text_alignment_mode
         self.text_source = text_source
         self.visual_feature_name = visual_feature_name
+        self.timbre_condition_name = timbre_condition_name
         self.load_energy = load_energy
         print(f"[FMAVSRDataset] split={split}/{subset}  clips={len(self.clips)}")
 
@@ -294,6 +296,9 @@ class FMAVSRDataset(Dataset):
             enc = enc[:_MAX_TA * 2]
         lat = normalize_latent(lat)
         spk = np.load(str(c/"speaker_emb.npy")).astype("float32")  # (256,)
+        timbre_cond = None
+        if self.timbre_condition_name:
+            timbre_cond = np.load(str(c / self.timbre_condition_name)).astype("float32")
         energy = (
             load_log_rms_energy(c, lat.shape[0]).astype("float32")
             if self.load_energy else None
@@ -314,6 +319,8 @@ class FMAVSRDataset(Dataset):
             "enc": enc, "latent": lat, "speaker": spk, "h_lm": h_lm,
             "text": txt, "lm_idx": lm_idx,
         }
+        if timbre_cond is not None:
+            item["timbre_cond"] = timbre_cond
         if energy is not None:
             item["energy"] = energy
         return item
@@ -331,6 +338,8 @@ def collate_fn(batch):
     has_energy = all(b.get("energy") is not None for b in batch)
     energy = np.zeros((B, max_Ta, 1), dtype=np.float32) if has_energy else None
     spk    = np.stack([b["speaker"] for b in batch])   # (B, 256)
+    has_timbre = all(b.get("timbre_cond") is not None for b in batch)
+    timbre_cond = np.stack([b["timbre_cond"] for b in batch]) if has_timbre else None
     texts  = [b["text"] for b in batch]
     has_lm_idx = all(b.get("lm_idx") is not None for b in batch)
     lm_idx = np.zeros((B, max_Ta), dtype=np.int64) if has_lm_idx else None
@@ -361,4 +370,6 @@ def collate_fn(batch):
             "lm_idx": lm_idx}
     if has_energy:
         out["energy"] = energy
+    if has_timbre:
+        out["timbre_cond"] = timbre_cond
     return out

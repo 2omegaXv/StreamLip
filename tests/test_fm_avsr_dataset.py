@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from streaminlip.fm_avsr_dataset import (
     FMAVSRDataset,
     build_word_timestamp_lm_indices,
+    collate_fn,
     compute_log_rms_energy,
     read_clip_text,
     validate_latent_frame_rate,
@@ -33,6 +34,32 @@ from scripts.train_fm_avsr import (
 
 
 class FMAVSRDatasetTest(unittest.TestCase):
+    def test_dataset_loads_custom_timbre_condition_and_collates_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clip = root / "pretrain" / "spk" / "00001"
+            clip.mkdir(parents=True)
+            (clip / "avsr_text.txt").write_text("TIMBRE\n")
+            np.save(clip / "avsr_enc.npy", np.ones((4, 768), dtype=np.float32))
+            np.savez(clip / "latent.npz", latent=np.ones((2, 512), dtype=np.float32))
+            np.save(clip / "speaker_emb.npy", np.ones((256,), dtype=np.float32))
+            np.save(clip / "smollm2_h.npy", np.ones((1, 960), dtype=np.float16))
+            np.save(clip / "timbre_cond.npy", np.arange(1024, dtype=np.float32))
+            clip_list = root / "clips.txt"
+            clip_list.write_text("pretrain/spk/00001\n")
+
+            ds = FMAVSRDataset(
+                str(root),
+                clip_list=str(clip_list),
+                timbre_condition_name="timbre_cond.npy",
+            )
+            item = ds[0]
+            batch = collate_fn([item])
+
+            self.assertEqual(item["timbre_cond"].shape, (1024,))
+            self.assertEqual(batch["timbre_cond"].shape, (1, 1024))
+            self.assertAlmostEqual(float(batch["timbre_cond"][0, 17]), 17.0)
+
     def test_read_clip_text_can_use_text_json_words(self):
         with tempfile.TemporaryDirectory() as tmp:
             clip = Path(tmp)
@@ -264,6 +291,18 @@ class FMAVSRDatasetTest(unittest.TestCase):
         self.assertAlmostEqual(metrics["mse"], 0.0)
         self.assertAlmostEqual(metrics["corr"], 1.0)
 
+    def test_aggregate_sample_metrics_can_skip_prompt_frames(self):
+        import torch
+
+        pred = torch.tensor([[[100.0], [2.0], [3.0]]])
+        target = torch.tensor([[[-100.0], [2.0], [3.0]]])
+        lengths = torch.tensor([3])
+
+        metrics = aggregate_sample_metrics(pred, target, lengths, start_frame=1)
+
+        self.assertAlmostEqual(metrics["mse"], 0.0)
+        self.assertAlmostEqual(metrics["corr"], 1.0)
+
     def test_combine_training_losses_can_disable_fm_loss(self):
         import torch
 
@@ -441,6 +480,25 @@ class FMAVSRDatasetTest(unittest.TestCase):
         self.assertGreater(h_text.abs().sum().item(), 0)
         self.assertGreater(v_video.abs().sum().item(), 0)
         self.assertTrue(torch.all(h_video == 0))
+
+    def test_prepare_conditions_returns_timbre_condition_when_present(self):
+        import torch
+
+        batch = {
+            "enc": np.ones((1, 6, 768), dtype=np.float32),
+            "latent": np.zeros((1, 3, 512), dtype=np.float32),
+            "latent_lens": np.array([3], dtype=np.int64),
+            "speaker": np.ones((1, 256), dtype=np.float32),
+            "h_lm": None,
+            "lens_L": None,
+            "timbre_cond": np.arange(1024, dtype=np.float32)[None, :],
+        }
+
+        prepared = prepare_conditions(batch, "cpu")
+        timbre_cond = prepared[7]
+
+        self.assertEqual(tuple(timbre_cond.shape), (1, 1024))
+        self.assertTrue(torch.allclose(timbre_cond[0, :3].float(), torch.tensor([0.0, 1.0, 2.0])))
 
     def test_prepare_conditions_can_shuffle_text_with_fixed_permutation(self):
         batch = {

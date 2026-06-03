@@ -204,6 +204,7 @@ class FMHead(nn.Module):
         use_cross_attn: bool = False,
         use_text_token_cross_attn: bool = False,
         extra_cond_dim: int = 0,
+        timbre_condition_dim: int = 0,
         ctc_vocab_size: int = 0,
         ctc_topk: int = 0,
         ctc_token_emb_dim: int = 0,
@@ -212,6 +213,7 @@ class FMHead(nn.Module):
         self.use_cross_attn = use_cross_attn
         self.use_text_token_cross_attn = use_text_token_cross_attn
         self.extra_cond_dim = extra_cond_dim
+        self.timbre_condition_dim = timbre_condition_dim
         self.ctc_topk = ctc_topk
         self.ctc_token_emb_dim = ctc_token_emb_dim
         ctc_cond_dim = ctc_token_emb_dim + ctc_topk if ctc_topk > 0 else 0
@@ -220,7 +222,10 @@ class FMHead(nn.Module):
             if ctc_vocab_size <= 0 or ctc_token_emb_dim <= 0:
                 raise ValueError("ctc top-k condition requires positive vocab and embedding dims")
             self.ctc_token_emb = nn.Embedding(ctc_vocab_size, ctc_token_emb_dim)
-        self.cond_proj  = nn.Linear(COND_DIM + extra_cond_dim + ctc_cond_dim, self.DIM)  # condition → 512
+        self.cond_proj  = nn.Linear(
+            COND_DIM + extra_cond_dim + timbre_condition_dim + ctc_cond_dim,
+            self.DIM,
+        )  # condition → 512
         self.cond_token_proj = nn.Linear(self.DIM, self.DIM)
         self.text_token_proj = nn.Linear(960, self.DIM)
         self.extra_pred_head = None
@@ -247,6 +252,7 @@ class FMHead(nn.Module):
         vis_down: torch.Tensor,   # (B, T_a, 960)
         h_down:   torch.Tensor,   # (B, T_a, 960)
         id_vec:   torch.Tensor,   # (B, 256)
+        timbre_cond: torch.Tensor | None = None,  # (B, timbre_condition_dim)
         text_tokens: torch.Tensor | None = None,  # (B, L, 960)
         extra_cond: torch.Tensor | None = None,  # (B, T_a, extra_cond_dim)
         ctc_topk_ids: torch.Tensor | None = None,  # (B, T_a, K)
@@ -256,6 +262,23 @@ class FMHead(nn.Module):
         T_a    = vis_down.shape[1]
         id_exp = id_vec.unsqueeze(1).expand(-1, T_a, -1)           # (B, T_a, 256)
         parts = [vis_down, h_down, id_exp]
+        if self.timbre_condition_dim > 0:
+            if timbre_cond is None:
+                timbre_cond = torch.zeros(
+                    vis_down.shape[0],
+                    self.timbre_condition_dim,
+                    device=vis_down.device,
+                    dtype=vis_down.dtype,
+                )
+            if timbre_cond.shape != (vis_down.shape[0], self.timbre_condition_dim):
+                raise ValueError(
+                    f"timbre_cond shape must be {(vis_down.shape[0], self.timbre_condition_dim)}, "
+                    f"got {tuple(timbre_cond.shape)}"
+                )
+            timbre_exp = timbre_cond.to(
+                device=vis_down.device, dtype=vis_down.dtype
+            ).unsqueeze(1).expand(-1, T_a, -1)
+            parts.append(timbre_exp)
         if self.extra_cond_dim > 0:
             if extra_cond is None:
                 extra_cond = torch.zeros(
@@ -331,12 +354,14 @@ class FMHead(nn.Module):
         id_vec: torch.Tensor,
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
+        timbre_cond: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         built = self._build_cond(
             vis_down, h_down, id_vec,
+            timbre_cond=timbre_cond,
             text_tokens=text_tokens,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
@@ -355,6 +380,7 @@ class FMHead(nn.Module):
         h_down: torch.Tensor,
         id_vec: torch.Tensor,
         text_tokens: torch.Tensor | None = None,
+        timbre_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -373,6 +399,7 @@ class FMHead(nn.Module):
             h_down,
             id_vec,
             text_tokens=text_tokens,
+            timbre_cond=timbre_cond,
             extra_cond=zeros,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,
@@ -389,6 +416,7 @@ class FMHead(nn.Module):
         lengths:  torch.Tensor | None = None,
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
+        timbre_cond: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
@@ -401,6 +429,7 @@ class FMHead(nn.Module):
             vis_down, h_down, id_vec,
             text_tokens=text_tokens,
             text_token_mask=text_token_mask,
+            timbre_cond=timbre_cond,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,
@@ -421,6 +450,7 @@ class FMHead(nn.Module):
         id_vec: torch.Tensor,
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
+        timbre_cond: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
@@ -430,6 +460,7 @@ class FMHead(nn.Module):
             vis_down, h_down, id_vec,
             text_tokens=text_tokens,
             text_token_mask=text_token_mask,
+            timbre_cond=timbre_cond,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,
@@ -447,6 +478,7 @@ class FMHead(nn.Module):
         t: torch.Tensor | None = None,
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
+        timbre_cond: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
@@ -457,6 +489,7 @@ class FMHead(nn.Module):
             vis_down, h_down, id_vec,
             text_tokens=text_tokens,
             text_token_mask=text_token_mask,
+            timbre_cond=timbre_cond,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,
@@ -476,6 +509,7 @@ class FMHead(nn.Module):
         nfe:      int = 10,
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
+        timbre_cond: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
@@ -485,6 +519,7 @@ class FMHead(nn.Module):
             vis_down, h_down, id_vec,
             text_tokens=text_tokens,
             text_token_mask=text_token_mask,
+            timbre_cond=timbre_cond,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,
@@ -509,6 +544,7 @@ class FMHead(nn.Module):
         nfe:      int = 10,
         text_tokens: torch.Tensor | None = None,
         text_token_mask: torch.Tensor | None = None,
+        timbre_cond: torch.Tensor | None = None,
         extra_cond: torch.Tensor | None = None,
         ctc_topk_ids: torch.Tensor | None = None,
         ctc_topk_probs: torch.Tensor | None = None,
@@ -518,6 +554,7 @@ class FMHead(nn.Module):
             vis_down, h_down, id_vec, nfe=nfe,
             text_tokens=text_tokens,
             text_token_mask=text_token_mask,
+            timbre_cond=timbre_cond,
             extra_cond=extra_cond,
             ctc_topk_ids=ctc_topk_ids,
             ctc_topk_probs=ctc_topk_probs,

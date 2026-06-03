@@ -46,6 +46,7 @@ class FMHeadAVSR(_FMBase):
         use_cross_attn=False,
         use_text_token_cross_attn=False,
         extra_cond_dim=0,
+        timbre_condition_dim=0,
         ctc_vocab_size=0,
         ctc_topk=0,
         ctc_token_emb_dim=0,
@@ -56,12 +57,16 @@ class FMHeadAVSR(_FMBase):
             use_cross_attn=use_cross_attn,
             use_text_token_cross_attn=use_text_token_cross_attn,
             extra_cond_dim=extra_cond_dim,
+            timbre_condition_dim=timbre_condition_dim,
             ctc_vocab_size=ctc_vocab_size,
             ctc_topk=ctc_topk,
             ctc_token_emb_dim=ctc_token_emb_dim,
         )
         ctc_cond_dim = ctc_token_emb_dim + ctc_topk if ctc_topk > 0 else 0
-        self.cond_proj = nn.Linear(768 + 960 + 256 + extra_cond_dim + ctc_cond_dim, self.DIM)
+        self.cond_proj = nn.Linear(
+            768 + 960 + 256 + timbre_condition_dim + extra_cond_dim + ctc_cond_dim,
+            self.DIM,
+        )
 
 
 def save_wav(audio: np.ndarray, path: str, sr: int = 24000):
@@ -125,6 +130,10 @@ def parse_args():
                    help="Text/SmolLM2 hidden-state source.")
     p.add_argument("--visual_feature_name", default="avsr_enc.npy",
                    help="Per-clip visual feature file, e.g. avsr_enc.npy or avsr_enc_lipavsr.npy.")
+    p.add_argument("--timbre_condition_name", default=None,
+                   help="Optional per-clip global timbre condition file, e.g. timbre_cond.npy.")
+    p.add_argument("--timbre_condition_dim", type=int, default=0,
+                   help="Dimension of the optional global timbre condition vector.")
     p.add_argument("--ctc_condition_mode",
                    choices=[
                        "none",
@@ -167,6 +176,8 @@ def parse_args():
                    help="Optional path to save per-clip normalized latent corr/MSE/MAE metrics.")
     p.add_argument("--metrics_only", action="store_true",
                    help="Skip Mimi loading and wav decoding; only compute latent metrics.")
+    p.add_argument("--metric_start_frame", type=int, default=0,
+                   help="Skip this many latent frames when computing metrics.")
     cli_keys = explicit_cli_keys()
     args = p.parse_args()
     if args.config:
@@ -175,10 +186,11 @@ def parse_args():
             cfg = yaml.safe_load(f) or {}
         config_keys = {"data_root", "mimi_path", "smollm2_path", "split", "clip_list",
                        "no_text_cond", "condition_mode", "text_alignment_mode", "text_source",
-                       "visual_feature_name",
+                       "visual_feature_name", "timbre_condition_name", "timbre_condition_dim",
                        "ctc_condition_mode", "auto_avsr_ckpt", "ctc_vocab_size",
                        "ctc_topk", "ctc_token_emb_dim", "energy_condition_mode",
-                       "n_dit_layers", "use_cross_attn", "use_text_token_cross_attn"}
+                       "n_dit_layers", "use_cross_attn", "use_text_token_cross_attn",
+                       "metric_start_frame"}
         for k, v in cfg.items():
             if k in config_keys:
                 if k in cli_keys and k != "config":
@@ -280,9 +292,16 @@ def shifted_condition_clip(clips, index: int, shift: int):
     return clips[(index + shift) % len(clips)]
 
 
-def latent_metrics(pred: np.ndarray, target: np.ndarray) -> dict:
-    pred_v = np.asarray(pred, dtype=np.float32).reshape(-1)
-    target_v = np.asarray(target, dtype=np.float32).reshape(-1)
+def latent_metrics(pred: np.ndarray, target: np.ndarray, start_frame: int = 0) -> dict:
+    pred = np.asarray(pred, dtype=np.float32)
+    target = np.asarray(target, dtype=np.float32)
+    start_frame = max(int(start_frame), 0)
+    if start_frame > 0:
+        if start_frame < pred.shape[0]:
+            pred = pred[start_frame:]
+            target = target[start_frame:]
+    pred_v = pred.reshape(-1)
+    target_v = target.reshape(-1)
     if pred_v.shape != target_v.shape:
         raise ValueError(f"latent shape mismatch: pred={pred.shape}, target={target.shape}")
     diff = pred_v - target_v
@@ -313,6 +332,7 @@ def main():
             ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
             + energy_extra_dim(args.energy_condition_mode)
         ),
+        timbre_condition_dim=args.timbre_condition_dim,
         ctc_vocab_size=args.ctc_vocab_size,
         ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
         ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -331,6 +351,7 @@ def main():
                 ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
                 + energy_extra_dim(args.energy_condition_mode)
             ),
+            timbre_condition_dim=args.timbre_condition_dim,
             ctc_vocab_size=args.ctc_vocab_size,
             ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
             ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -357,6 +378,9 @@ def main():
     ds = FMAVSRDataset(
         args.data_root, args.split, subset=subset, clip_list=args.clip_list,
         visual_feature_name=args.visual_feature_name,
+        text_alignment_mode=args.text_alignment_mode,
+        text_source=args.text_source,
+        timbre_condition_name=args.timbre_condition_name,
     )
     clips = ds.clips[:args.n]
     print(f"Evaluating {len(clips)} clips → {out_dir}\n")
@@ -379,6 +403,10 @@ def main():
             target_enc = np.load(str(c / args.visual_feature_name)).astype("float32")
             lat_gt = validate_latent_frame_rate(lat_gt, target_enc.shape[0], c)
             spk = np.load(str(cond_c / "speaker_emb.npy")).astype("float32")  # (256,)
+            timbre_t = None
+            if args.timbre_condition_name:
+                timbre = np.load(str(cond_c / args.timbre_condition_name)).astype("float32")
+                timbre_t = torch.from_numpy(timbre).to(device, dtype=torch.bfloat16).unsqueeze(0)
 
             T_a = min(lat_gt.shape[0], _MAX_TA)
 
@@ -440,6 +468,7 @@ def main():
             elif args.energy_condition_mode == "pred":
                 pred_energy = predict_energy_condition(
                     fm, residual_base, v_down, h_down, spk_t,
+                    timbre_cond=timbre_t,
                     text_tokens=text_tokens,
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
@@ -454,6 +483,7 @@ def main():
                     v_down, h_down, spk_t,
                     text_tokens=text_tokens,
                     text_token_mask=text_token_mask,
+                    timbre_cond=timbre_t,
                     extra_cond=extra_cond,
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
@@ -463,6 +493,7 @@ def main():
                         v_down, h_down, spk_t,
                         text_tokens=text_tokens,
                         text_token_mask=text_token_mask,
+                        timbre_cond=timbre_t,
                         extra_cond=extra_cond,
                         ctc_topk_ids=ctc_ids,
                         ctc_topk_probs=ctc_probs,
@@ -482,6 +513,7 @@ def main():
                     v_down, h_down, spk_t, noise, denoise_t,
                     text_tokens=text_tokens,
                     text_token_mask=text_token_mask,
+                    timbre_cond=timbre_t,
                     extra_cond=extra_cond,
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
@@ -491,18 +523,23 @@ def main():
                     v_down, h_down, spk_t, nfe=args.nfe,
                     text_tokens=text_tokens,
                     text_token_mask=text_token_mask,
+                    timbre_cond=timbre_t,
                     extra_cond=extra_cond,
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
                 )
             pred_norm_np = pred_latent.squeeze(0).float().cpu().numpy()
             target_norm_np = normalize_latent(lat_gt[:T_a])
-            row_metrics = latent_metrics(pred_norm_np, target_norm_np)
+            row_metrics = latent_metrics(
+                pred_norm_np, target_norm_np,
+                start_frame=args.metric_start_frame,
+            )
             metrics_rows.append({
                 "index": i,
                 "target_clip": str(c),
                 "condition_clip": str(cond_c),
                 "condition_shift": int(args.condition_shift),
+                "metric_start_frame": int(args.metric_start_frame),
                 "T_a": int(T_a),
                 **row_metrics,
             })
@@ -523,6 +560,7 @@ def main():
         summary = {
             "n": len(metrics_rows),
             "condition_shift": int(args.condition_shift),
+            "metric_start_frame": int(args.metric_start_frame),
             "mean_corr": float(np.mean([r["corr"] for r in metrics_rows])) if metrics_rows else 0.0,
             "mean_mse": float(np.mean([r["mse"] for r in metrics_rows])) if metrics_rows else 0.0,
             "mean_mae": float(np.mean([r["mae"] for r in metrics_rows])) if metrics_rows else 0.0,

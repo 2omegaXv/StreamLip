@@ -44,6 +44,7 @@ class FMHeadAVSR(_FMBase):
         use_cross_attn=False,
         use_text_token_cross_attn=False,
         extra_cond_dim=0,
+        timbre_condition_dim=0,
         ctc_vocab_size=0,
         ctc_topk=0,
         ctc_token_emb_dim=0,
@@ -54,12 +55,16 @@ class FMHeadAVSR(_FMBase):
             use_cross_attn=use_cross_attn,
             use_text_token_cross_attn=use_text_token_cross_attn,
             extra_cond_dim=extra_cond_dim,
+            timbre_condition_dim=timbre_condition_dim,
             ctc_vocab_size=ctc_vocab_size,
             ctc_topk=ctc_topk,
             ctc_token_emb_dim=ctc_token_emb_dim,
         )
         ctc_cond_dim = ctc_token_emb_dim + ctc_topk if ctc_topk > 0 else 0
-        self.cond_proj = nn.Linear(768 + 960 + 256 + extra_cond_dim + ctc_cond_dim, self.DIM)
+        self.cond_proj = nn.Linear(
+            768 + 960 + 256 + timbre_condition_dim + extra_cond_dim + ctc_cond_dim,
+            self.DIM,
+        )
 from streaminlip.fm_avsr_dataset import FMAVSRDataset, collate_fn
 
 try:
@@ -113,6 +118,10 @@ def parse_args():
                    help="Text source for transcripts and pre-extracted SmolLM2 hidden states.")
     p.add_argument("--visual_feature_name", default="avsr_enc.npy",
                    help="Per-clip visual feature file, e.g. avsr_enc.npy or avsr_enc_lipavsr.npy.")
+    p.add_argument("--timbre_condition_name", default=None,
+                   help="Optional per-clip global timbre condition file, e.g. timbre_cond.npy.")
+    p.add_argument("--timbre_condition_dim", type=int, default=0,
+                   help="Dimension of the optional global timbre condition vector.")
     p.add_argument("--ctc_condition_mode",
                    choices=[
                        "none",
@@ -193,6 +202,8 @@ def parse_args():
                    help="Maximum denoise time embedding for noisy endpoint training.")
     p.add_argument("--eval_sample_nfe",  type=int, default=4,
                    help="Euler steps for validation sampled endpoint metrics.")
+    p.add_argument("--metric_start_frame", type=int, default=0,
+                   help="Skip this many latent frames when reporting endpoint metrics.")
     p.add_argument("--no_wandb",         action="store_true")
     p.add_argument("--debug",            action="store_true")
     cli_keys = explicit_cli_keys()
@@ -260,10 +271,19 @@ def crop_batch_to_latent_window(enc_np, latent_np, latent_lens, crop_ta, rng=Non
     return enc_crop, lat_crop, crop_lens
 
 
-def aggregate_sample_metrics(pred: torch.Tensor, target: torch.Tensor, lengths: torch.Tensor):
+def aggregate_sample_metrics(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    lengths: torch.Tensor,
+    start_frame: int = 0,
+):
     """Return scalar endpoint metrics over valid latent frames only."""
     lengths = lengths.to(device=pred.device, dtype=torch.long).clamp(min=1, max=pred.shape[1])
-    mask = torch.arange(pred.shape[1], device=pred.device).unsqueeze(0) < lengths.unsqueeze(1)
+    start_frame = max(int(start_frame), 0)
+    frame_idx = torch.arange(pred.shape[1], device=pred.device).unsqueeze(0)
+    mask = (frame_idx < lengths.unsqueeze(1)) & (frame_idx >= start_frame)
+    if not bool(mask.any()):
+        mask = frame_idx < lengths.unsqueeze(1)
     mask = mask.unsqueeze(-1).expand_as(pred)
     pred_v = pred.float()[mask]
     target_v = target.float()[mask]
@@ -328,6 +348,7 @@ def predict_energy_condition(
     vis_down: torch.Tensor,
     h_down: torch.Tensor,
     spk: torch.Tensor,
+    timbre_cond: torch.Tensor | None = None,
     text_tokens: torch.Tensor | None = None,
     ctc_topk_ids: torch.Tensor | None = None,
     ctc_topk_probs: torch.Tensor | None = None,
@@ -337,6 +358,7 @@ def predict_energy_condition(
         vis_down,
         h_down,
         spk,
+        timbre_cond=timbre_cond,
         text_tokens=text_tokens,
         ctc_topk_ids=ctc_topk_ids,
         ctc_topk_probs=ctc_topk_probs,
@@ -421,6 +443,9 @@ def prepare_conditions(
     lat_gt = torch.from_numpy(batch["latent"]).to(device, dtype=torch.float32)
     lat_lens = torch.from_numpy(batch["latent_lens"]).to(device)
     spk = torch.from_numpy(batch["speaker"]).to(device, dtype=torch.bfloat16)
+    timbre_cond = None
+    if batch.get("timbre_cond") is not None:
+        timbre_cond = torch.from_numpy(batch["timbre_cond"]).to(device, dtype=torch.bfloat16)
     B, T_a = lat_gt.shape[:2]
 
     v_down = enc[:, ::2, :][:, :T_a, :]
@@ -525,6 +550,7 @@ def prepare_conditions(
         lat_lens,
         text_tokens,
         text_token_mask,
+        timbre_cond,
         extra_cond,
         ctc_topk_ids,
         ctc_topk_probs,
@@ -688,6 +714,7 @@ def main():
             ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
             + energy_extra_dim(args.energy_condition_mode)
         ),
+        timbre_condition_dim=args.timbre_condition_dim,
         ctc_vocab_size=args.ctc_vocab_size,
         ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
         ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -711,6 +738,7 @@ def main():
                 ctc_extra_dim(args.ctc_condition_mode, args.ctc_vocab_size)
                 + energy_extra_dim(args.energy_condition_mode)
             ),
+            timbre_condition_dim=args.timbre_condition_dim,
             ctc_vocab_size=args.ctc_vocab_size,
             ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
             ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -755,6 +783,7 @@ def main():
         tokenizer=tokenizer, text_alignment_mode=args.text_alignment_mode,
         text_source=args.text_source,
         visual_feature_name=args.visual_feature_name,
+        timbre_condition_name=args.timbre_condition_name,
         load_energy=mode_uses_energy_supervision(args.energy_condition_mode),
     )
     if args.val_clip_list:
@@ -765,6 +794,7 @@ def main():
             tokenizer=tokenizer, text_alignment_mode=args.text_alignment_mode,
             text_source=args.text_source,
             visual_feature_name=args.visual_feature_name,
+            timbre_condition_name=args.timbre_condition_name,
             load_energy=mode_uses_energy_supervision(args.energy_condition_mode),
         )
         train_n = len(train_ds)
@@ -844,6 +874,7 @@ def main():
                     lat_lens,
                     text_tokens,
                     text_mask,
+                    timbre_cond,
                     extra_cond,
                     ctc_ids,
                     ctc_probs,
@@ -860,6 +891,7 @@ def main():
                         energy_gt = batch_energy_tensor(batch, device, lat_gt.shape[1])
                         pred_energy = predict_energy_condition(
                             fm, residual_base, v_down, h_down, spk,
+                            timbre_cond=timbre_cond,
                             text_tokens=text_tokens,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -874,6 +906,7 @@ def main():
                             lengths=lat_lens,
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
+                            timbre_cond=timbre_cond,
                             extra_cond=extra_cond,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -889,6 +922,7 @@ def main():
                             v_down, h_down, spk,
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
+                            timbre_cond=timbre_cond,
                             extra_cond=extra_cond,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -899,6 +933,7 @@ def main():
                                     v_down, h_down, spk,
                                     text_tokens=text_tokens,
                                     text_token_mask=text_mask,
+                                    timbre_cond=timbre_cond,
                                     extra_cond=extra_cond.detach(),
                                     ctc_topk_ids=ctc_ids,
                                     ctc_topk_probs=ctc_probs,
@@ -936,6 +971,7 @@ def main():
                             nfe=args.sample_recon_nfe,
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
+                            timbre_cond=timbre_cond,
                             extra_cond=extra_cond,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -952,6 +988,7 @@ def main():
                             v_down, h_down, spk, noise, denoise_t,
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
+                            timbre_cond=timbre_cond,
                             extra_cond=extra_cond,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -1063,6 +1100,7 @@ def main():
                                 lat_v_lens,
                                 text_tokens_v,
                                 text_mask_v,
+                                timbre_v,
                                 extra_v,
                                 ctc_ids_v,
                                 ctc_probs_v,
@@ -1076,12 +1114,14 @@ def main():
                                 energy_gt_v = batch_energy_tensor(vb, device, lat_v.shape[1])
                                 pred_energy_v = predict_energy_condition(
                                     fm, residual_base, vd_v, hd_v, spk_v,
+                                    timbre_cond=timbre_v,
                                     text_tokens=text_tokens_v,
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
                                 )
                                 energy_metrics = aggregate_sample_metrics(
-                                    pred_energy_v, energy_gt_v, lat_v_lens
+                                    pred_energy_v, energy_gt_v, lat_v_lens,
+                                    start_frame=args.metric_start_frame,
                                 )
                                 for k, v in energy_metrics.items():
                                     val_energy[k].append(v)
@@ -1091,6 +1131,7 @@ def main():
                                     vd_v, hd_v, spk_v, lat_v, lengths=lat_v_lens,
                                     text_tokens=text_tokens_v,
                                     text_token_mask=text_mask_v,
+                                    timbre_cond=timbre_v,
                                     extra_cond=extra_v,
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
@@ -1099,6 +1140,7 @@ def main():
                                 vd_v, hd_v, spk_v,
                                 text_tokens=text_tokens_v,
                                 text_token_mask=text_mask_v,
+                                timbre_cond=timbre_v,
                                 extra_cond=extra_v,
                                 ctc_topk_ids=ctc_ids_v,
                                 ctc_topk_probs=ctc_probs_v,
@@ -1108,6 +1150,7 @@ def main():
                                     vd_v, hd_v, spk_v,
                                     text_tokens=text_tokens_v,
                                     text_token_mask=text_mask_v,
+                                    timbre_cond=timbre_v,
                                     extra_cond=extra_v,
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
@@ -1117,7 +1160,10 @@ def main():
                                 )
                             else:
                                 pred_recon_v = pred_recon_v_raw
-                            recon_metrics = aggregate_sample_metrics(pred_recon_v, lat_v, lat_v_lens)
+                            recon_metrics = aggregate_sample_metrics(
+                                pred_recon_v, lat_v, lat_v_lens,
+                                start_frame=args.metric_start_frame,
+                            )
                             for k, v in recon_metrics.items():
                                 val_recon[k].append(v)
                             if args.lambda_denoise > 0:
@@ -1132,12 +1178,14 @@ def main():
                                     vd_v, hd_v, spk_v, noise_v, denoise_t_v,
                                     text_tokens=text_tokens_v,
                                     text_token_mask=text_mask_v,
+                                    timbre_cond=timbre_v,
                                     extra_cond=extra_v,
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
                                 )
                                 denoise_metrics = aggregate_sample_metrics(
-                                    pred_denoise_v, lat_v, lat_v_lens
+                                    pred_denoise_v, lat_v, lat_v_lens,
+                                    start_frame=args.metric_start_frame,
                                 )
                                 for k, v in denoise_metrics.items():
                                     val_denoise[k].append(v)
@@ -1147,11 +1195,15 @@ def main():
                                     nfe=args.eval_sample_nfe,
                                     text_tokens=text_tokens_v,
                                     text_token_mask=text_mask_v,
+                                    timbre_cond=timbre_v,
                                     extra_cond=extra_v,
                                     ctc_topk_ids=ctc_ids_v,
                                     ctc_topk_probs=ctc_probs_v,
                                 )
-                                sample_metrics = aggregate_sample_metrics(pred_v, lat_v, lat_v_lens)
+                                sample_metrics = aggregate_sample_metrics(
+                                    pred_v, lat_v, lat_v_lens,
+                                    start_frame=args.metric_start_frame,
+                                )
                                 for k, v in sample_metrics.items():
                                     val_sample[k].append(v)
                             n += 1
@@ -1166,12 +1218,14 @@ def main():
                             train_energy_gt = batch_energy_tensor(batch, device, lat_gt.shape[1])
                             train_pred_energy = predict_energy_condition(
                                 fm, residual_base, v_down, h_down, spk,
+                                timbre_cond=timbre_cond,
                                 text_tokens=text_tokens,
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
                             )
                             train_energy = aggregate_sample_metrics(
-                                train_pred_energy, train_energy_gt, lat_lens
+                                train_pred_energy, train_energy_gt, lat_lens,
+                                start_frame=args.metric_start_frame,
                             )
                             train_extra_cond = train_pred_energy
                         else:
@@ -1181,6 +1235,7 @@ def main():
                             v_down, h_down, spk,
                             text_tokens=text_tokens,
                             text_token_mask=text_mask,
+                            timbre_cond=timbre_cond,
                             extra_cond=train_extra_cond,
                             ctc_topk_ids=ctc_ids,
                             ctc_topk_probs=ctc_probs,
@@ -1190,6 +1245,7 @@ def main():
                                 v_down, h_down, spk,
                                 text_tokens=text_tokens,
                                 text_token_mask=text_mask,
+                                timbre_cond=timbre_cond,
                                 extra_cond=train_extra_cond,
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
@@ -1199,7 +1255,10 @@ def main():
                             )
                         else:
                             pred_train_recon = pred_train_recon_raw
-                        train_recon = aggregate_sample_metrics(pred_train_recon, lat_gt, lat_lens)
+                        train_recon = aggregate_sample_metrics(
+                            pred_train_recon, lat_gt, lat_lens,
+                            start_frame=args.metric_start_frame,
+                        )
                         if args.lambda_denoise > 0:
                             noise_train = torch.randn_like(lat_gt).to(dtype=torch.bfloat16)
                             denoise_t_train = torch.full(
@@ -1212,12 +1271,14 @@ def main():
                                 v_down, h_down, spk, noise_train, denoise_t_train,
                                 text_tokens=text_tokens,
                                 text_token_mask=text_mask,
+                                timbre_cond=timbre_cond,
                                 extra_cond=train_extra_cond,
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
                             )
                             train_denoise = aggregate_sample_metrics(
-                                pred_train_denoise, lat_gt, lat_lens
+                                pred_train_denoise, lat_gt, lat_lens,
+                                start_frame=args.metric_start_frame,
                             )
                         else:
                             train_denoise = {"mse": 0.0, "mae": 0.0, "corr": 0.0, "rel_l2": 0.0}
@@ -1227,11 +1288,15 @@ def main():
                                 nfe=args.eval_sample_nfe,
                                 text_tokens=text_tokens,
                                 text_token_mask=text_mask,
+                                timbre_cond=timbre_cond,
                                 extra_cond=train_extra_cond,
                                 ctc_topk_ids=ctc_ids,
                                 ctc_topk_probs=ctc_probs,
                             )
-                            train_sample = aggregate_sample_metrics(pred_train, lat_gt, lat_lens)
+                            train_sample = aggregate_sample_metrics(
+                                pred_train, lat_gt, lat_lens,
+                                start_frame=args.metric_start_frame,
+                            )
                         else:
                             train_sample = {"mse": 0.0, "mae": 0.0, "corr": 0.0, "rel_l2": 0.0}
                     print(
