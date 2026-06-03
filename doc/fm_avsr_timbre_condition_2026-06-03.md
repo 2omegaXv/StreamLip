@@ -92,16 +92,17 @@ stopping in mind.
 | 30k mean/std + audio prompt tokens | 3000 | 0.56967886 | 0.68265299 | 0.60941165 | full 1k eval, 2500-step continuation |
 | 30k mean/std + audio prompt tokens + pooled prompt cond | 2500 | 0.56971665 | 0.68110923 | 0.61001512 | full 1k eval |
 | 30k pooled prompt residual from step2500 | 1500 | 0.57236865 | 0.67809615 | 0.60854835 | full 1k eval; frozen pooled prompt baseline |
+| 30k pooled prompt residual + corr loss | 2500 | 0.57255184 | 0.67793650 | 0.60844724 | full 1k eval; continuation from residual step1500 |
 | 30k audio prompt tokens + loss start 38 | 1000 | n/a | n/a | n/a | early stopped; training-val corr 0.54083031 |
 | 30k pooled prompt, 8 DiT layers | 2000 | n/a | n/a | n/a | early stopped; training-val corr 0.56734583 |
 | 30k audio prompt tokens, shifted condition | 2500 | 0.00798798 | 1.28502175 | 0.87642337 | full 1k negative control, `condition_shift=1` |
 
-The best verified full-eval result is `0.57236865` from the residual refinement
-on top of the pooled audio prompt model. This is:
+The best verified full-eval result is `0.57255184` from the residual refinement
+plus a light corr-loss continuation. This is:
 
-- +0.03938532 over the strict 30k no-timbre baseline
-- +0.00907976 over the 30k mean/std timbre model
-- +0.00265201 over the pooled audio prompt model
+- +0.03956850 over the strict 30k no-timbre baseline
+- +0.00926294 over the 30k mean/std timbre model
+- +0.00283519 over the pooled audio prompt model
 - still below the target `0.6`
 
 The shifted-condition negative control drops to approximately zero correlation,
@@ -210,15 +211,55 @@ improves the previous best by `+0.00265201`, but the curve is nearly saturated
 by step1500. This is a useful correction layer, not enough by itself to close
 the remaining gap to 0.6.
 
+### Residual Corr-Loss Continuation
+
+Run:
+`runs/fm_avsr/lipavsr_30000_timbre3s_audioprompt38_pool_residual_corr01_from1500_recon_textjson_wordts_v1`
+
+This continuation resumes the residual checkpoint at step1500 and adds
+`lambda_recon_corr=0.1` with `lr=5e-5`. The objective is still mostly MSE, but
+with a small direct pressure on the same global Pearson correlation used by the
+eval metric.
+
+| Step | Val recon corr | Elapsed |
+| ---: | ---: | ---: |
+| 2000 | 0.57419035 | 356.4885s |
+| 2500 | 0.57420011 | 703.2253s |
+
+Full 1k eval at step2500 is `0.57255184`, with MSE `0.67793650` and MAE
+`0.60844724`. This is only `+0.00018318` over the residual step1500 full eval,
+so corr loss is directionally positive but effectively saturated in this setup.
+
+### Lip-AVSR Data Availability
+
+The processed dataset currently has more visual inputs than encoded training
+features:
+
+- `lip_avsr.npy`: 86,696 clips
+- `avsr_enc_lipavsr.npy`: 32,238 clips
+- current val1000 all have `avsr_enc_lipavsr.npy`
+- trainable `avsr_enc_lipavsr.npy` after excluding current val1000: 31,238 clips
+- current 30k split already covers all but 1,238 of those trainable encoded clips
+- `lip_avsr.npy` clips still missing `avsr_enc_lipavsr.npy`: 54,458 clips
+
+A naive 65k split built from older length filters is not usable for lip-AVSR
+training because most entries lack `avsr_enc_lipavsr.npy`. The data-scale route
+therefore requires first running `scripts/extract_avsr_enc.py` with
+`--input_name lip_avsr.npy --output_name avsr_enc_lipavsr.npy` for the missing
+clips, then training on the larger encoded split. Training only the current
+31.2k encoded clips is unlikely to change the result materially compared with
+the existing 30k runs.
+
 ## Interpretation
 
 Manual timbre control is practical in this codebase. The mean/std prompt is a
 simple global condition, the stronger token prompt gives a measurable but small
 additional gain, and residual refinement on top of the best prompt model gives a
-further small correction. The remaining gap to 0.6 is likely not just "missing
-speaker identity"; the model is still bottlenecked by the visual/text-to-Mimi
-latent prediction problem and by how strongly the decoder can use a short
-reference prompt.
+further small correction. A light corr loss adds almost nothing after residual
+training. The remaining gap to 0.6 is likely not just "missing speaker
+identity"; the model is still bottlenecked by the visual/text-to-Mimi latent
+prediction problem and by the amount of newly encoded lip-AVSR data available to
+the FM head.
 
 The current best prompt is same-clip and should be treated as an upper-bound
 style diagnostic. A production-style voice control path should next test
