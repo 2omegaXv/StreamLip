@@ -46,6 +46,7 @@ class FMHeadAVSR(_FMBase):
         extra_cond_dim=0,
         timbre_condition_dim=0,
         audio_prompt_dim=0,
+        audio_prompt_pool_cond=False,
         ctc_vocab_size=0,
         ctc_topk=0,
         ctc_token_emb_dim=0,
@@ -58,6 +59,7 @@ class FMHeadAVSR(_FMBase):
             extra_cond_dim=extra_cond_dim,
             timbre_condition_dim=timbre_condition_dim,
             audio_prompt_dim=audio_prompt_dim,
+            audio_prompt_pool_cond=audio_prompt_pool_cond,
             ctc_vocab_size=ctc_vocab_size,
             ctc_topk=ctc_topk,
             ctc_token_emb_dim=ctc_token_emb_dim,
@@ -128,6 +130,8 @@ def parse_args():
                    help="Use this many normalized Mimi prefix frames as audio prompt tokens.")
     p.add_argument("--audio_prompt_dim", type=int, default=0,
                    help="Dimension of each audio prompt token; usually 512 for Mimi latent.")
+    p.add_argument("--audio_prompt_pool_cond", action="store_true",
+                   help="Also add mean-pooled audio prompt tokens to the frame condition.")
     p.add_argument("--ctc_condition_mode",
                    choices=[
                        "none",
@@ -728,6 +732,7 @@ def main():
         ),
         timbre_condition_dim=args.timbre_condition_dim,
         audio_prompt_dim=args.audio_prompt_dim,
+        audio_prompt_pool_cond=args.audio_prompt_pool_cond,
         ctc_vocab_size=args.ctc_vocab_size,
         ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
         ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -753,6 +758,7 @@ def main():
             ),
             timbre_condition_dim=args.timbre_condition_dim,
             audio_prompt_dim=args.audio_prompt_dim,
+            audio_prompt_pool_cond=args.audio_prompt_pool_cond,
             ctc_vocab_size=args.ctc_vocab_size,
             ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
             ctc_token_emb_dim=args.ctc_token_emb_dim,

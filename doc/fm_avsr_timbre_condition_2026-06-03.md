@@ -89,13 +89,15 @@ stopping in mind.
 | 30k mean/std timbre | 2500 | 0.56328889 | 0.68858632 | 0.61404544 | full 1k eval |
 | 30k mean/std + corr loss | 3000 | 0.56697732 | n/a | n/a | training-val only; `lambda_recon_corr=0.2` continuation |
 | 30k mean/std + audio prompt tokens | 2500 | 0.56893905 | 0.68224197 | 0.61025584 | full 1k eval |
+| 30k mean/std + audio prompt tokens | 3000 | 0.56967886 | 0.68265299 | 0.60941165 | full 1k eval, 2500-step continuation |
+| 30k mean/std + audio prompt tokens + pooled prompt cond | 2500 | 0.56971665 | 0.68110923 | 0.61001512 | full 1k eval |
 | 30k audio prompt tokens, shifted condition | 2500 | 0.00798798 | 1.28502175 | 0.87642337 | full 1k negative control, `condition_shift=1` |
 
-The best verified full-eval result is `0.56893905` from the audio prompt token
+The best verified full-eval result is `0.56971665` from the pooled audio prompt
 model. This is:
 
-- +0.03595571 over the strict 30k no-timbre baseline
-- +0.00565016 over the 30k mean/std timbre model
+- +0.03673331 over the strict 30k no-timbre baseline
+- +0.00642775 over the 30k mean/std timbre model
 - still below the target `0.6`
 
 The shifted-condition negative control drops to approximately zero correlation,
@@ -114,10 +116,32 @@ Run:
 | 1500 | 0.56017650 | 930.7614s |
 | 2000 | 0.56724529 | 1234.7743s |
 | 2500 | 0.57115404 | 1541.1965s |
+| 3000 | 0.57309073 | 321.1879s continuation |
 
-The curve was still increasing at 2500 steps, but the improvement had slowed to
-about +0.0039 over the previous 500-step interval. A short continuation to 3000
-steps is the next low-risk check.
+The 2500 to 3000 continuation only improved full 1k eval from `0.56893905` to
+`0.56967886`, so simply extending the same run is not likely to close the gap to
+0.6 quickly.
+
+### Pooled Audio Prompt Condition
+
+Run:
+`runs/fm_avsr/lipavsr_30000_timbre3s_audioprompt38_pool_recon_textjson_wordts_v1`
+
+This variant keeps the cross-attention prompt tokens and also adds their mean
+pooled projection into the frame condition, so prompt information reaches both
+the per-frame condition stream and the DiT global modulation path.
+
+| Step | Val recon corr | Elapsed |
+| ---: | ---: | ---: |
+| 500 | 0.51763669 | 329.7789s |
+| 1000 | 0.54430954 | 625.7661s |
+| 1500 | 0.55867916 | 923.1617s |
+| 2000 | 0.56680157 | 1228.7904s |
+| 2500 | 0.57077152 | 1511.6859s |
+
+Full 1k eval at step2500 is `0.56971665`. This is only `+0.00077760` over the
+token-only prompt step2500 full eval, and only `+0.00003779` over the token-only
+step3000 full eval. It is therefore a measurable but marginal improvement.
 
 ## Interpretation
 
@@ -132,6 +156,12 @@ The current best prompt is same-clip and should be treated as an upper-bound
 style diagnostic. A production-style voice control path should next test
 same-speaker external prompts, stronger prompt fusion, or an explicit speaker /
 prompt consistency loss.
+
+The next low-risk experiment should align training and evaluation more tightly:
+when using same-clip prompt frames, the reconstruction loss currently still
+includes the first 38 prompt frames even though eval skips them. Skipping prompt
+frames in the reconstruction loss may focus capacity on the non-prompt segment
+that is actually measured.
 
 ## Verification
 

@@ -75,6 +75,24 @@ class TimbreConditionTest(unittest.TestCase):
 
         self.assertEqual(tuple(out.shape), (2, 4, 512))
 
+    def test_audio_prompt_pool_condition_affects_frame_condition_without_cross_attention(self):
+        fm = FMHeadAVSR(
+            n_layers=1,
+            use_cross_attn=False,
+            audio_prompt_dim=512,
+            audio_prompt_pool_cond=True,
+        )
+        v = torch.zeros(2, 4, 768)
+        h = torch.zeros(2, 4, 960)
+        spk = torch.zeros(2, 256)
+        prompt_a = torch.zeros(2, 3, 512)
+        prompt_b = torch.ones(2, 3, 512)
+
+        cond_a, _ = fm._build_cond(v, h, spk, audio_prompt=prompt_a)
+        cond_b, _ = fm._build_cond(v, h, spk, audio_prompt=prompt_b)
+
+        self.assertGreater(float((cond_a - cond_b).detach().abs().sum()), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
