@@ -26,6 +26,7 @@ from scripts.train_fm_avsr import (
     compose_residual_prediction,
     masked_corr_loss,
     masked_mse_loss,
+    masked_timbre_stats_loss,
     parse_args,
     project_latent_to_pca_target,
     prepare_conditions,
@@ -313,6 +314,19 @@ class FMAVSRDatasetTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertTrue(torch.isfinite(pred.grad).all())
 
+    def test_masked_timbre_stats_loss_matches_valid_post_prompt_mean_and_std(self):
+        import torch
+
+        pred = torch.tensor([[[100.0], [1.0], [3.0], [1000.0]]])
+        target = torch.tensor([[[-100.0], [2.0], [4.0], [-1000.0]]])
+        lengths = torch.tensor([3])
+
+        loss = masked_timbre_stats_loss(pred, target, lengths, start_frame=1)
+
+        # Valid post-prompt frames are [1, 3] and [2, 4]. Means differ by 1,
+        # unbiased=False stds match, and padded frame 3 must be ignored.
+        self.assertAlmostEqual(loss.item(), 1.0)
+
     def test_project_latent_to_pca_target_can_disable_projection(self):
         import torch
 
@@ -368,6 +382,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             loss_energy=torch.tensor(7.0),
             loss_recon_corr=torch.tensor(11.0),
             loss_recon_pca=torch.tensor(13.0),
+            loss_timbre_stats=torch.tensor(17.0),
             loss_fm_weight=0.0,
             lambda_recon=1.0,
             lambda_sample_recon=0.5,
@@ -375,6 +390,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             lambda_energy=0.0,
             lambda_recon_corr=0.0,
             lambda_recon_pca=0.0,
+            lambda_timbre_stats=0.0,
         )
 
         self.assertAlmostEqual(loss.item(), 4.75)
@@ -390,6 +406,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             loss_energy=torch.tensor(0.0),
             loss_recon_corr=torch.tensor(3.0),
             loss_recon_pca=torch.tensor(7.0),
+            loss_timbre_stats=torch.tensor(0.0),
             loss_fm_weight=0.0,
             lambda_recon=1.0,
             lambda_sample_recon=0.0,
@@ -397,6 +414,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             lambda_energy=0.0,
             lambda_recon_corr=0.5,
             lambda_recon_pca=0.0,
+            lambda_timbre_stats=0.0,
         )
 
         self.assertAlmostEqual(loss.item(), 3.5)
@@ -412,6 +430,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             loss_energy=torch.tensor(0.0),
             loss_recon_corr=torch.tensor(0.0),
             loss_recon_pca=torch.tensor(3.0),
+            loss_timbre_stats=torch.tensor(0.0),
             loss_fm_weight=0.0,
             lambda_recon=1.0,
             lambda_sample_recon=0.0,
@@ -419,6 +438,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             lambda_energy=0.0,
             lambda_recon_corr=0.0,
             lambda_recon_pca=0.25,
+            lambda_timbre_stats=0.0,
         )
 
         self.assertAlmostEqual(loss.item(), 2.75)
@@ -434,6 +454,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             loss_energy=torch.tensor(2.0),
             loss_recon_corr=torch.tensor(3.0),
             loss_recon_pca=torch.tensor(5.0),
+            loss_timbre_stats=torch.tensor(0.0),
             loss_fm_weight=0.0,
             lambda_recon=0.0,
             lambda_sample_recon=0.0,
@@ -441,9 +462,34 @@ class FMAVSRDatasetTest(unittest.TestCase):
             lambda_energy=0.5,
             lambda_recon_corr=0.0,
             lambda_recon_pca=0.0,
+            lambda_timbre_stats=0.0,
         )
 
         self.assertAlmostEqual(loss.item(), 1.0)
+
+    def test_combine_training_losses_can_include_timbre_stats_loss(self):
+        import torch
+
+        loss = combine_training_losses(
+            loss_fm=torch.tensor(0.0),
+            loss_recon=torch.tensor(2.0),
+            loss_sample_recon=torch.tensor(0.0),
+            loss_denoise=torch.tensor(0.0),
+            loss_energy=torch.tensor(0.0),
+            loss_recon_corr=torch.tensor(0.0),
+            loss_recon_pca=torch.tensor(0.0),
+            loss_timbre_stats=torch.tensor(3.0),
+            loss_fm_weight=0.0,
+            lambda_recon=1.0,
+            lambda_sample_recon=0.0,
+            lambda_denoise=0.0,
+            lambda_energy=0.0,
+            lambda_recon_corr=0.0,
+            lambda_recon_pca=0.0,
+            lambda_timbre_stats=0.5,
+        )
+
+        self.assertAlmostEqual(loss.item(), 3.5)
 
     def test_compose_residual_prediction_adds_baseline_and_residual(self):
         import torch

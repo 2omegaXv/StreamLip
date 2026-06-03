@@ -279,28 +279,98 @@ It resumes
 uses the same timbre and audio prompt conditioning, switches to the 50k split,
 and lowers the continuation learning rate to `1e-4`.
 
+### 50k Continuation Results
+
+| Run | Step | Eval corr | Eval MSE | Eval MAE | Notes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 50k pooled prompt continuation | 3500 | 0.58008041 | 0.66951530 | 0.60291130 | resumed 30k pooled prompt step2500 |
+| 50k pooled prompt continuation | 4000 | 0.58013729 | 0.66926031 | 0.60292721 | saturated; best 50k base |
+| 50k pooled prompt + GT energy eval | 4000 | 0.58030405 | 0.66907275 | 0.60281535 | diagnostic upper-bound for energy condition |
+| 50k residual from step4000 | 1000 | 0.58091919 | 0.66841430 | 0.60245221 | best verified full eval in this note |
+| 50k residual + timbre-stats loss | 1500 | 0.58105725 | 0.66844833 | 0.60244348 | `lambda_timbre_stats=0.2`, `lambda_recon_corr=0.05` |
+
+The 50k scale-up improved the best full eval from `0.57255184` to
+`0.58091919`. Residual timbre-stat continuation added only `+0.00013806`
+over the 50k residual checkpoint and slightly worsened MSE, so it is not a
+meaningful path toward `0.6`.
+
+The GT-energy diagnostic moved the 50k base only from `0.58013729` to
+`0.58030405`. This rules out predicted log-RMS energy as the main bottleneck in
+the current best architecture.
+
+### Prompt Calibration Diagnostics
+
+A one-off full-val diagnostic tested whether the first 38 prompt frames could be
+used to linearly calibrate the rest of the predicted latent without additional
+training. All metrics used the 50k residual step1000 checkpoint and
+`metric_start_frame=38`.
+
+| Calibration | Eval corr | Eval MSE | Eval MAE |
+| --- | ---: | ---: | ---: |
+| raw residual prediction | 0.58091919 | 0.66841430 | 0.60245221 |
+| clip mean-shift, alpha 0.25 | 0.58078388 | 0.66857146 | 0.60255020 |
+| clip mean-shift, alpha 1.0 | 0.57779765 | 0.67218273 | 0.60470650 |
+| clip per-dim affine, alpha 0.25 | 0.58062730 | 0.66894736 | 0.60264453 |
+| clip per-dim affine, alpha 1.0 | 0.57656243 | 0.67530594 | 0.60596099 |
+| leaky full-val post-frame affine, alpha 1.0 | 0.58113608 | 0.66799752 | 0.60256379 |
+| global prompt-frame affine, alpha 1.0 | 0.58070137 | 0.66890699 | 0.60258606 |
+
+The same-clip prompt is already being used by the model, but its residual error
+is not a simple per-clip mean/std/affine mismatch. Even a leaky affine fitted on
+the full validation set only reaches `0.58113608`. This makes further linear
+prompt calibration or energy tuning unlikely to close the remaining gap.
+
+### Timbre-Stats Loss
+
+Added `masked_timbre_stats_loss` in `scripts/train_fm_avsr.py`. It matches the
+per-sample post-prompt latent mean and std over valid frames:
+
+```text
+loss_timbre_stats = mse(mean(pred), mean(target)) + mse(std(pred), std(target))
+```
+
+The implementation is controlled by `--lambda_timbre_stats`, logged in
+`metrics.csv`, saved in checkpoints, and covered by unit tests. The 50k residual
+continuation config is
+`configs/fm_avsr_lipavsr_50000_timbre3s_audioprompt38_pool_residual_timbrestats_from1000_recon_textjson_wordts.yaml`.
+
+Training:
+
+- resume: 50k residual step1000
+- residual base: 50k pooled prompt step4000
+- `lr: 5e-5`
+- `lambda_timbre_stats: 0.2`
+- `lambda_recon_corr: 0.05`
+- `loss_start_frame: 38`
+- max extra steps: 500
+- validation recon corr at step1500: `0.5824`
+
+Full eval at step1500 was `0.58105725`. This is a weak positive on corr but too
+small to justify further tuning of this exact loss.
+
 ## Interpretation
 
 Manual timbre control is practical in this codebase. The mean/std prompt is a
 simple global condition, the stronger token prompt gives a measurable but small
 additional gain, and residual refinement on top of the best prompt model gives a
-further small correction. A light corr loss adds almost nothing after residual
-training. The remaining gap to 0.6 is likely not just "missing speaker
-identity"; the model is still bottlenecked by the visual/text-to-Mimi latent
-prediction problem and by the amount of newly encoded lip-AVSR data available to
-the FM head.
+further small correction. A light corr loss, GT energy, prompt affine
+calibration, and post-prompt timbre-stat matching all add almost nothing after
+residual training. The remaining gap to 0.6 is likely not just "missing speaker
+identity"; the deterministic MSE-style latent head is still averaging over
+speaker and spectral detail that is not recoverable from the current condition
+fusion.
 
 The current best prompt is same-clip and should be treated as an upper-bound
 style diagnostic. A production-style voice control path should next test
-same-speaker external prompts, stronger prompt fusion, or an explicit speaker /
-prompt consistency loss.
+same-speaker external prompts, stronger prompt fusion, an explicit speaker /
+prompt consistency loss, or a stronger sampled/denoising generative objective
+instead of continuing to tune deterministic recon losses.
 
 ## Verification
 
 Code support for `timbre_cond` and `audio_prompt` was covered by unit tests:
 
-- `python -m unittest tests.test_timbre_condition tests.test_fm_avsr_dataset -v`
-- `python -m unittest tests.test_eval_fm_avsr tests.test_fm_head_temporal_condition -v`
-- `python -m py_compile src/streaminlip/v2/fm_head.py src/streaminlip/fm_avsr_dataset.py scripts/train_fm_avsr.py scripts/eval_fm_avsr.py`
+- `uv run python -m unittest tests.test_fm_avsr_dataset tests.test_timbre_condition tests.test_eval_fm_avsr tests.test_fm_head_temporal_condition -v`
+- `uv run python -m py_compile scripts/train_fm_avsr.py scripts/eval_fm_avsr.py src/streaminlip/fm_avsr_dataset.py src/streaminlip/v2/fm_head.py`
 
 All individual training/eval runs in this note were kept under the 1-hour limit.
