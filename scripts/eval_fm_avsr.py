@@ -99,6 +99,16 @@ def mimi_decode(mimi, latent_np, device):
     return x.squeeze().float().cpu().numpy()
 
 
+def slice_latent_for_wav_output(latent_np: np.ndarray, start_frame: int = 0) -> np.ndarray:
+    start = max(0, int(start_frame))
+    if start <= 0:
+        return latent_np
+    if latent_np.shape[0] <= 1:
+        return latent_np
+    start = min(start, latent_np.shape[0] - 1)
+    return latent_np[start:]
+
+
 def explicit_cli_keys(argv=None):
     argv = argv or sys.argv
     keys = set()
@@ -203,6 +213,8 @@ def parse_args():
                    help="Skip Mimi loading and wav decoding; only compute latent metrics.")
     p.add_argument("--metric_start_frame", type=int, default=0,
                    help="Skip this many latent frames when computing metrics.")
+    p.add_argument("--wav_start_frame", type=int, default=0,
+                   help="Skip this many latent frames when saving pred/GT wavs.")
     cli_keys = explicit_cli_keys()
     args = p.parse_args()
     if args.config:
@@ -728,10 +740,12 @@ def main():
 
             if not args.metrics_only:
                 pred_np = denormalize_latent(pred_norm_np)
-                save_wav(mimi_decode(mimi, pred_np, device), str(out_dir / f"{i:04d}_pred.wav"))
+                pred_wav_lat = slice_latent_for_wav_output(pred_np, args.wav_start_frame)
+                save_wav(mimi_decode(mimi, pred_wav_lat, device), str(out_dir / f"{i:04d}_pred.wav"))
 
             if args.save_gt and not args.metrics_only:
-                gt_np = mimi_decode(mimi, lat_gt[:T_a], device)
+                gt_wav_lat = slice_latent_for_wav_output(lat_gt[:T_a], args.wav_start_frame)
+                gt_np = mimi_decode(mimi, gt_wav_lat, device)
                 save_wav(gt_np, str(out_dir / f"{i:04d}_gt.wav"))
 
             txt = (c / "avsr_text.txt").read_text().strip()

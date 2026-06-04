@@ -48,6 +48,20 @@ class EvalFMAVSRTest(unittest.TestCase):
         self.assertAlmostEqual(metrics["mse"], 0.0)
         self.assertAlmostEqual(metrics["corr"], 1.0)
 
+    def test_slice_latent_for_wav_output_skips_prompt_frames(self):
+        lat = np.arange(5 * 2, dtype=np.float32).reshape(5, 2)
+
+        out = eval_fm_avsr.slice_latent_for_wav_output(lat, start_frame=3)
+
+        np.testing.assert_array_equal(out, lat[3:])
+
+    def test_slice_latent_for_wav_output_keeps_at_least_one_frame(self):
+        lat = np.arange(3 * 2, dtype=np.float32).reshape(3, 2)
+
+        out = eval_fm_avsr.slice_latent_for_wav_output(lat, start_frame=10)
+
+        np.testing.assert_array_equal(out, lat[-1:])
+
     def test_parse_args_exposes_metrics_only_default(self):
         old_argv = sys.argv
         try:
