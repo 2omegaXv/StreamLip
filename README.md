@@ -91,41 +91,38 @@ vis_reprocess_avsr/lip_avsr_crop_with_audio.mp4
 The first 3.04 seconds are used as same-clip audio/timbre prompt and are removed
 from the exported listening videos.
 
-### Silent Video With Optional Reference Audio
+### Silent Reference Demo
 
-For a silent video, keep the full video length and optionally provide a separate
-reference audio file for timbre/audio prompt:
-
-```bash
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
-  scripts/run_raw_video_avsr_recon_pipeline.py \
-  --input path/to/silent.mp4 \
-  --ref_audio path/to/ref.wav \
-  --silent_input \
-  --exp silent_ref_demo \
-  --force
-```
-
-If `--ref_audio` is omitted, the pipeline writes zero `audio_prompt.npy` and
-zero `timbre_cond.npy`, which is the default/no-reference voice condition:
-
-```bash
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
-  scripts/run_raw_video_avsr_recon_pipeline.py \
-  --input path/to/silent.mp4 \
-  --silent_input \
-  --exp silent_default_demo \
-  --force
-```
-
-Silent-mode output keeps the full standardized video length:
+Use the checked-in full-length silent/reference example. It is the only
+documented silent-mode demo for this branch.
 
 ```text
-eval_out/<exp>/<exp>_pred_full.mp4
+data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4
+data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4
+data/assets/trump_silent_ref_demo/trump_silent_ref_demo_full_pred_full.mp4
 ```
 
-The separate reference audio is used only as model conditioning; it is not muxed
-directly into the output. The generated audio still comes from FM-AVSR + Mimi.
+The silent input is `data/trump.mov` with the final 3 seconds removed and all
+audio stripped. The reference file is the final 3 seconds of the same source
+video, kept with audio for timbre/audio-prompt conditioning.
+
+Reproduce the generated full-length output:
+
+```bash
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
+  scripts/run_raw_video_avsr_recon_pipeline.py \
+  --input data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4 \
+  --ref_audio data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4 \
+  --silent_input \
+  --exp trump_silent_ref_demo_full \
+  --force
+```
+
+Expected generated video:
+
+```text
+eval_out/trump_silent_ref_demo_full/trump_silent_ref_demo_full_pred_full.mp4
+```
 
 ## GUI
 
@@ -174,36 +171,6 @@ metric_start_frame: 38
 mean_corr: 0.3878001476
 mean_mse: 0.8064498901
 mean_mae: 0.6968652010
-```
-
-Full-length silent/ref demo assets:
-
-```text
-data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4
-data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4
-data/assets/trump_silent_ref_demo/trump_silent_ref_demo_full_pred_full.mp4
-```
-
-The silent input is `data/trump.mov` with the final 3 seconds removed and all
-audio stripped. The reference file is the final 3 seconds of the same source
-video, kept with audio for timbre/audio-prompt conditioning.
-
-Reproduce the generated full-length output:
-
-```bash
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
-  scripts/run_raw_video_avsr_recon_pipeline.py \
-  --input data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4 \
-  --ref_audio data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4 \
-  --silent_input \
-  --exp trump_silent_ref_demo_full \
-  --force
-```
-
-Expected generated video:
-
-```text
-eval_out/trump_silent_ref_demo_full/trump_silent_ref_demo_full_pred_full.mp4
 ```
 
 ## Tests
