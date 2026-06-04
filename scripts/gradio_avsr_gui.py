@@ -141,6 +141,8 @@ def _progress_html(step: int, elapsed: float, finished: bool, error: bool = Fals
 # ---------------------------------------------------------------------------
 def run_pipeline(
     input_video,
+    ref_audio,
+    silent_input,
     exp_name,
     fa_device,
     size,
@@ -186,6 +188,10 @@ def run_pipeline(
         "--config",           config,
         "--ckpt",             ckpt,
     ]
+    if silent_input:
+        cmd.append("--silent_input")
+    if ref_audio:
+        cmd.extend(["--ref_audio", str(ref_audio)])
     if force:
         cmd.append("--force")
 
@@ -242,7 +248,8 @@ def run_pipeline(
         yield btn_idle, _progress_html(step, elapsed, False, error=True), None
         return
 
-    pred_mp4 = REPO_ROOT / "eval_out" / exp / f"{exp}_pred_prompt3s_post3s.mp4"
+    pred_name = f"{exp}_pred_full.mp4" if silent_input else f"{exp}_pred_prompt3s_post3s.mp4"
+    pred_mp4 = REPO_ROOT / "eval_out" / exp / pred_name
     video_out = str(pred_mp4) if pred_mp4.exists() else None
     yield btn_idle, _progress_html(N - 1, elapsed, finished=True), video_out
 
@@ -296,12 +303,14 @@ def build_app() -> gr.Blocks:
 
         gr.Markdown(
             "## 🎙 Raw Video → AVSR 音频重建\n"
-            "上传带说话人的视频，前 3 秒作音色 prompt，输出为生成音频合成回视频。"
+            "上传视频，可选 reference 音频作为音色 prompt，输出为生成音频合成回视频。"
         )
 
         with gr.Row():
             with gr.Column(scale=1, min_width=320):
                 input_video = gr.Video(label="输入视频 (.mov / .mp4)", sources=["upload"])
+                ref_audio   = gr.Audio(label="参考音频（可选）", sources=["upload"], type="filepath")
+                silent_input = gr.Checkbox(label="输入视频无声音 / 输出保留整段长度", value=False)
                 exp_name    = gr.Textbox(label="实验名称", placeholder="如 trump_test")
                 force       = gr.Checkbox(label="强制重跑（清除旧结果）", value=True)
 
@@ -328,7 +337,7 @@ def build_app() -> gr.Blocks:
         run_btn.click(
             fn=run_pipeline,
             inputs=[
-                input_video, exp_name, fa_device, size, force,
+                input_video, ref_audio, silent_input, exp_name, fa_device, size, force,
                 mimi_path, smollm2_path, auto_avsr_ckpt, resnet50_weights,
                 norm_stats, config_path, ckpt_path,
             ],

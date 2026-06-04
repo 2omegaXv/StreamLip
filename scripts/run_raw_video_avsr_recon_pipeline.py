@@ -40,6 +40,10 @@ DEFAULT_CKPT = (
     "runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_"
     "residual_samplecorr02_from1000_recon_textjson_wordts_v1/step_001500.pt"
 )
+PROMPT_FRAMES = 38
+LATENT_DIM = 512
+VIDEO_FPS = 25.0
+LATENT_HZ = 12.5
 
 
 def run(cmd: list[str], *, cwd: Path = REPO_ROOT) -> None:
@@ -57,14 +61,29 @@ def require_file(path: Path, label: str) -> None:
         raise FileNotFoundError(f"{label} not found: {path}")
 
 
-def standardize_video(input_video: Path, out_mp4: Path, size: int) -> None:
+def standardize_video(input_video: Path, out_mp4: Path, size: int, *, silent_input: bool = False) -> None:
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
-    run([
+    cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(input_video),
         "-vf", f"fps=25,scale={size}:{size}",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-        "-ar", "24000", "-ac", "1", "-c:a", "aac",
+    ]
+    if silent_input:
+        cmd += ["-an"]
+    else:
+        cmd += ["-ar", "24000", "-ac", "1", "-c:a", "aac"]
+    cmd.append(str(out_mp4))
+    run(cmd)
+
+
+def add_silent_audio(video_mp4: Path, out_mp4: Path) -> None:
+    run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(video_mp4),
+        "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy", "-c:a", "aac", "-shortest",
         str(out_mp4),
     ])
 
@@ -113,12 +132,62 @@ def extract_mimi_latent(clip_dir: Path, mimi_path: Path) -> None:
     print(f"latent: {lat.shape} {lat.dtype}", flush=True)
 
 
-def extract_speaker_and_timbre(clip_dir: Path, processed_root: Path, resnet50_weights: Path) -> None:
+def encode_audio_latent(audio_path: Path, mimi_path: Path) -> np.ndarray:
+    sys.path.insert(0, str(REPO_ROOT))
+    from scripts.preprocess_lrs3 import build_mimi, extract_latent
+    import torch
+
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    mimi = build_mimi(device, mimi_path)
+    return extract_latent(mimi, audio_path, device).astype("float32")
+
+
+def standardize_ref_audio(ref_audio: Path, out_wav: Path) -> None:
+    out_wav.parent.mkdir(parents=True, exist_ok=True)
+    run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(ref_audio),
+        "-vn", "-ar", "24000", "-ac", "1",
+        str(out_wav),
+    ])
+
+
+def build_audio_prompt_condition(latent: np.ndarray | None, prompt_frames: int = PROMPT_FRAMES) -> np.ndarray:
+    prompt = np.zeros((prompt_frames, LATENT_DIM), dtype=np.float32)
+    if latent is None:
+        return prompt
+    n_prompt = min(prompt_frames, latent.shape[0])
+    prompt[:n_prompt] = latent[:n_prompt, :LATENT_DIM]
+    return prompt
+
+
+def build_timbre_condition_for_pipeline(latent: np.ndarray | None) -> np.ndarray:
+    if latent is None:
+        return np.zeros((LATENT_DIM * 2,), dtype=np.float32)
+    from scripts.extract_timbre_cond import build_timbre_condition
+
+    return build_timbre_condition(latent, prompt_frames=PROMPT_FRAMES).astype("float32")
+
+
+def write_dummy_target_latent(clip_dir: Path, n_video_frames: int) -> np.ndarray:
+    n_latent = max(1, int(np.ceil(float(n_video_frames) * LATENT_HZ / VIDEO_FPS)))
+    latent = np.zeros((n_latent, LATENT_DIM), dtype=np.float16)
+    np.savez(str(clip_dir / "latent.npz"), latent=latent)
+    return latent
+
+
+def extract_speaker_and_timbre(
+    clip_dir: Path,
+    processed_root: Path,
+    resnet50_weights: Path,
+    *,
+    ref_latent: np.ndarray | None = None,
+    zero_condition: bool = False,
+) -> None:
     sys.path.insert(0, str(REPO_ROOT / "src"))
     sys.path.insert(0, str(REPO_ROOT))
     import torch
     from scripts.extract_speaker_emb import extract_clip
-    from scripts.extract_timbre_cond import build_timbre_condition
     from streaminlip.fm_avsr_dataset import normalize_latent, set_norm_stats_path
     from streaminlip.v2.speaker_encoder import SpeakerEncoder
 
@@ -126,12 +195,19 @@ def extract_speaker_and_timbre(clip_dir: Path, processed_root: Path, resnet50_we
     encoder = SpeakerEncoder(weights_path=str(resnet50_weights)).to(device).eval()
     extract_clip(encoder, clip_dir, device, force=True)
     set_norm_stats_path(processed_root / "latent_norm_stats.npz")
-    latent = np.load(str(clip_dir / "latent.npz"))["latent"].astype("float32")
-    timbre = build_timbre_condition(normalize_latent(latent), prompt_frames=38)
+    latent = None
+    if not zero_condition:
+        latent = ref_latent
+    if latent is None and not zero_condition:
+        latent = np.load(str(clip_dir / "latent.npz"))["latent"].astype("float32")
+    norm_latent = normalize_latent(latent) if latent is not None else None
+    timbre = build_timbre_condition_for_pipeline(norm_latent)
     np.save(str(clip_dir / "timbre_cond.npy"), timbre.astype("float16"))
+    prompt = build_audio_prompt_condition(norm_latent)
+    np.save(str(clip_dir / "audio_prompt.npy"), prompt.astype("float16"))
     print(
         f"speaker: {np.load(str(clip_dir / 'speaker_emb.npy')).shape} "
-        f"timbre: {timbre.shape}",
+        f"timbre: {timbre.shape} audio_prompt: {prompt.shape}",
         flush=True,
     )
 
@@ -176,7 +252,10 @@ def run_recon(
     output_dir: Path,
     config: Path,
     ckpt: Path,
+    *,
+    silent_input: bool = False,
 ) -> None:
+    wav_start = recon_wav_start_frame(silent_input=silent_input)
     run([
         sys.executable,
         str(REPO_ROOT / "scripts/eval_fm_avsr.py"),
@@ -189,25 +268,44 @@ def run_recon(
         "--output_dir", str(output_dir),
         "--n", "1",
         "--use_recon",
-        "--wav_start_frame", "38",
-        "--metric_start_frame", "38",
-        "--save_gt",
+        "--audio_prompt_name", "audio_prompt.npy",
+        "--wav_start_frame", str(wav_start),
+        "--metric_start_frame", str(wav_start),
         "--metrics_json", str(output_dir / "metrics.json"),
-    ])
+    ] + ([] if silent_input else ["--save_gt"]))
 
 
-def mux_outputs(exp_dir: Path, exp: str, recon_dir: Path, std_mp4: Path) -> None:
-    pred_mp4 = exp_dir / f"{exp}_pred_prompt3s_post3s.mp4"
-    gt_mp4 = exp_dir / f"{exp}_gt_mimi_post3s.mp4"
-    for wav_name, out_mp4 in [("0000_pred.wav", pred_mp4), ("0000_gt.wav", gt_mp4)]:
-        run([
+def recon_wav_start_frame(*, silent_input: bool) -> int:
+    return 0 if silent_input else PROMPT_FRAMES
+
+
+def result_video_names(exp: str, *, silent_input: bool) -> tuple[str, str | None]:
+    if silent_input:
+        return f"{exp}_pred_full.mp4", None
+    return f"{exp}_pred_prompt3s_post3s.mp4", f"{exp}_gt_mimi_post3s.mp4"
+
+
+def mux_outputs(exp_dir: Path, exp: str, recon_dir: Path, std_mp4: Path, *, silent_input: bool) -> None:
+    pred_name, gt_name = result_video_names(exp, silent_input=silent_input)
+    jobs = [("0000_pred.wav", exp_dir / pred_name)]
+    if gt_name is not None:
+        jobs.append(("0000_gt.wav", exp_dir / gt_name))
+    for wav_name, out_mp4 in jobs:
+        cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-ss", "3.04", "-i", str(std_mp4),
+        ]
+        if not silent_input:
+            cmd += ["-ss", "3.04"]
+        cmd += [
+            "-i", str(std_mp4),
             "-i", str(recon_dir / wav_name),
             "-map", "0:v:0", "-map", "1:a:0",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
             "-c:a", "aac", "-shortest",
             str(out_mp4),
+        ]
+        run([
+            *cmd,
         ])
 
 
@@ -262,8 +360,12 @@ def make_visualization(exp_dir: Path, clip_dir: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="Input .mov/.mp4 with audio.")
+    parser.add_argument("--input", required=True, help="Input .mov/.mp4 video.")
     parser.add_argument("--exp", required=True, help="Output experiment name under eval_out/<exp>.")
+    parser.add_argument("--silent_input", action="store_true",
+                        help="Treat input as silent video and keep full output length.")
+    parser.add_argument("--ref_audio", default=None,
+                        help="Optional reference audio/video used for timbre and audio prompt in silent_input mode.")
     parser.add_argument("--fa_device", default="cuda:0")
     parser.add_argument("--size", type=int, default=224)
     parser.add_argument("--force", action="store_true", help="Delete eval_out/<exp> before running.")
@@ -289,6 +391,9 @@ def main() -> None:
     args = parse_args()
     input_video = Path(args.input).resolve()
     require_file(input_video, "input video")
+    ref_audio = Path(args.ref_audio).resolve() if args.ref_audio else None
+    if ref_audio is not None:
+        require_file(ref_audio, "reference audio")
 
     exp = args.exp.strip().replace("/", "_")
     exp_dir = REPO_ROOT / "eval_out" / exp
@@ -302,24 +407,52 @@ def main() -> None:
     shutil.copyfile(args.norm_stats, processed_root / "latent_norm_stats.npz")
 
     std_mp4 = exp_dir / f"{exp}_224_25fps.mp4"
+    preprocess_mp4 = std_mp4
     clip_list = exp_dir / "clip_list.txt"
     clip_list.write_text(f"custom/{exp}/00001\n")
 
-    standardize_video(input_video, std_mp4, args.size)
-    run_face_audio_preprocess(std_mp4, clip_dir, exp_dir, args.fa_device)
+    standardize_video(input_video, std_mp4, args.size, silent_input=args.silent_input)
+    if args.silent_input:
+        preprocess_mp4 = exp_dir / f"{exp}_224_25fps_silent_audio_for_preprocess.mp4"
+        add_silent_audio(std_mp4, preprocess_mp4)
+    run_face_audio_preprocess(preprocess_mp4, clip_dir, exp_dir, args.fa_device)
     run_avsr_lip_reprocess(std_mp4, clip_dir, exp_dir, args.fa_device, Path(args.avsr_worker))
-    extract_mimi_latent(clip_dir, Path(args.mimi_path))
+    ref_latent = None
+    if args.silent_input:
+        n_video_frames = int(np.load(str(clip_dir / "lip_avsr.npy"), mmap_mode="r").shape[0])
+        write_dummy_target_latent(clip_dir, n_video_frames)
+        if ref_audio is not None:
+            ref_wav = exp_dir / "ref_audio_24k_mono.wav"
+            standardize_ref_audio(ref_audio, ref_wav)
+            ref_latent = encode_audio_latent(ref_wav, Path(args.mimi_path))
+    else:
+        extract_mimi_latent(clip_dir, Path(args.mimi_path))
     extract_avsr_and_text(processed_root, clip_list, Path(args.auto_avsr_ckpt), Path(args.smollm2_path))
-    extract_speaker_and_timbre(clip_dir, processed_root, Path(args.resnet50_weights))
+    extract_speaker_and_timbre(
+        clip_dir,
+        processed_root,
+        Path(args.resnet50_weights),
+        ref_latent=ref_latent,
+        zero_condition=args.silent_input and ref_latent is None,
+    )
 
     recon_dir = exp_dir / "recon_lipavsr_prompt3s"
-    run_recon(processed_root, clip_list, recon_dir, Path(args.config), Path(args.ckpt))
-    mux_outputs(exp_dir, exp, recon_dir, std_mp4)
+    run_recon(
+        processed_root,
+        clip_list,
+        recon_dir,
+        Path(args.config),
+        Path(args.ckpt),
+        silent_input=args.silent_input,
+    )
+    mux_outputs(exp_dir, exp, recon_dir, std_mp4, silent_input=args.silent_input)
     make_visualization(exp_dir, clip_dir)
 
+    pred_name, gt_name = result_video_names(exp, silent_input=args.silent_input)
     print("\nArtifacts:")
-    print(f"  pred mp4: {exp_dir / f'{exp}_pred_prompt3s_post3s.mp4'}")
-    print(f"  gt mp4:   {exp_dir / f'{exp}_gt_mimi_post3s.mp4'}")
+    print(f"  pred mp4: {exp_dir / pred_name}")
+    if gt_name:
+        print(f"  gt mp4:   {exp_dir / gt_name}")
     print(f"  vis mp4:  {exp_dir / 'vis_reprocess_avsr/face_lip_avsr_side_by_side_with_audio.mp4'}")
     print(f"  metrics:  {recon_dir / 'metrics.json'}")
 

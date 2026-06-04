@@ -165,6 +165,8 @@ def parse_args():
                    help="Dimension of the optional global timbre condition vector.")
     p.add_argument("--audio_prompt_frames", type=int, default=0,
                    help="Use this many normalized Mimi prefix frames as audio prompt tokens.")
+    p.add_argument("--audio_prompt_name", default=None,
+                   help="Optional per-clip audio prompt file, e.g. audio_prompt.npy.")
     p.add_argument("--audio_prompt_dim", type=int, default=0,
                    help="Dimension of each audio prompt token; usually 512 for Mimi latent.")
     p.add_argument("--audio_prompt_pool_cond", action="store_true",
@@ -231,7 +233,7 @@ def parse_args():
         config_keys = {"data_root", "mimi_path", "smollm2_path", "split", "clip_list",
                        "no_text_cond", "condition_mode", "text_alignment_mode", "text_source",
                        "visual_feature_name", "timbre_condition_name", "timbre_condition_dim",
-                       "audio_prompt_frames", "audio_prompt_dim", "audio_prompt_pool_cond",
+                       "audio_prompt_frames", "audio_prompt_name", "audio_prompt_dim", "audio_prompt_pool_cond",
                        "audio_prompt_stat_pool_cond", "audio_prompt_learned_pool_cond",
                        "ctc_condition_mode", "auto_avsr_ckpt", "ctc_vocab_size",
                        "ctc_topk", "ctc_token_emb_dim", "energy_condition_mode",
@@ -537,14 +539,19 @@ def main():
                 timbre_t = torch.from_numpy(timbre).to(device, dtype=torch.bfloat16).unsqueeze(0)
             audio_prompt = None
             if args.audio_prompt_frames > 0:
-                cond_lat = np.load(str(cond_c / "latent.npz"))["latent"].astype("float32")
-                cond_lat = validate_latent_frame_rate(cond_lat, enc.shape[0], cond_c)
-                cond_lat = normalize_latent(cond_lat)
                 prompt_np = np.zeros(
-                    (args.audio_prompt_frames, cond_lat.shape[1]), dtype=np.float32
+                    (args.audio_prompt_frames, 512), dtype=np.float32
                 )
-                n_prompt = min(args.audio_prompt_frames, cond_lat.shape[0])
-                prompt_np[:n_prompt] = cond_lat[:n_prompt]
+                if args.audio_prompt_name:
+                    loaded_prompt = np.load(str(cond_c / args.audio_prompt_name)).astype("float32")
+                    n_prompt = min(args.audio_prompt_frames, loaded_prompt.shape[0])
+                    prompt_np[:n_prompt, :loaded_prompt.shape[1]] = loaded_prompt[:n_prompt]
+                else:
+                    cond_lat = np.load(str(cond_c / "latent.npz"))["latent"].astype("float32")
+                    cond_lat = validate_latent_frame_rate(cond_lat, enc.shape[0], cond_c)
+                    cond_lat = normalize_latent(cond_lat)
+                    n_prompt = min(args.audio_prompt_frames, cond_lat.shape[0])
+                    prompt_np[:n_prompt, :cond_lat.shape[1]] = cond_lat[:n_prompt]
                 audio_prompt = torch.from_numpy(prompt_np).to(
                     device, dtype=torch.bfloat16
                 ).unsqueeze(0)

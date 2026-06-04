@@ -47,7 +47,11 @@ The raw-video path expects these local assets to exist:
 
 ## Raw Video Pipeline
 
-Run one input video end to end:
+### Video With Audio
+
+Run one input video end to end. The first 3.04 seconds of the input audio are
+used as the same-clip timbre/audio prompt and are removed from the listening
+output:
 
 ```bash
 /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
@@ -86,6 +90,42 @@ vis_reprocess_avsr/lip_avsr_crop_with_audio.mp4
 
 The first 3.04 seconds are used as same-clip audio/timbre prompt and are removed
 from the exported listening videos.
+
+### Silent Video With Optional Reference Audio
+
+For a silent video, keep the full video length and optionally provide a separate
+reference audio file for timbre/audio prompt:
+
+```bash
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
+  scripts/run_raw_video_avsr_recon_pipeline.py \
+  --input path/to/silent.mp4 \
+  --ref_audio path/to/ref.wav \
+  --silent_input \
+  --exp silent_ref_demo \
+  --force
+```
+
+If `--ref_audio` is omitted, the pipeline writes zero `audio_prompt.npy` and
+zero `timbre_cond.npy`, which is the default/no-reference voice condition:
+
+```bash
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
+  scripts/run_raw_video_avsr_recon_pipeline.py \
+  --input path/to/silent.mp4 \
+  --silent_input \
+  --exp silent_default_demo \
+  --force
+```
+
+Silent-mode output keeps the full standardized video length:
+
+```text
+eval_out/<exp>/<exp>_pred_full.mp4
+```
+
+The separate reference audio is used only as model conditioning; it is not muxed
+directly into the output. The generated audio still comes from FM-AVSR + Mimi.
 
 ## GUI
 
@@ -136,6 +176,32 @@ mean_mse: 0.8064498901
 mean_mae: 0.6968652010
 ```
 
+Silent/ref smoke example:
+
+```bash
+mkdir -p eval_out/readme_silent_ref_inputs
+ffmpeg -y -hide_banner -loglevel error \
+  -i data/trump.mov -t 8 -an -vf fps=25,scale=224:224 \
+  -c:v libx264 -preset veryfast -crf 18 \
+  eval_out/readme_silent_ref_inputs/trump_8s_silent.mp4
+ffmpeg -y -hide_banner -loglevel error \
+  -i data/trump.mov -t 3.5 -vn -ar 24000 -ac 1 \
+  eval_out/readme_silent_ref_inputs/trump_ref_3p5s.wav
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
+  scripts/run_raw_video_avsr_recon_pipeline.py \
+  --input eval_out/readme_silent_ref_inputs/trump_8s_silent.mp4 \
+  --ref_audio eval_out/readme_silent_ref_inputs/trump_ref_3p5s.wav \
+  --silent_input \
+  --exp trump_silent_ref_verify \
+  --force
+```
+
+Expected generated video:
+
+```text
+eval_out/trump_silent_ref_verify/trump_silent_ref_verify_pred_full.mp4
+```
+
 ## Tests
 
 Core validation command:
@@ -147,4 +213,3 @@ Core validation command:
   tests.test_timbre_condition \
   tests.test_fm_head_temporal_condition
 ```
-
