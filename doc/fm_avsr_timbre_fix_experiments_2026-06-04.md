@@ -302,3 +302,49 @@ condition, not just as speaker identity. The practical handoff remains E2 with
 post-prompt export cropping; a true fix requires retraining around a
 speaker-only/fixed-size timbre embedding or randomized reference-window
 training that prevents prompt-content copying.
+
+### E5: Same-Parent Reference Prompt During Training
+
+Hypothesis:
+
+Most training clips have another clip under the same `pretrain/<video_id>/`
+parent (`59035/59144` training clips are in multi-clip parents). Using a
+same-parent neighbor as the audio prompt should preserve rough speaker/session
+style while breaking the exact equality between the prompt and the target
+opening content.
+
+Code/config:
+
+- `FMAVSRDataset(audio_prompt_ref_mode="same_parent_next")`
+  - default `self_prefix` keeps previous behavior;
+  - `same_parent_next` loads the prompt latent from the next clip under the same
+    parent directory, falling back to self for singletons.
+- `scripts/train_fm_avsr.py`
+  - adds `--audio_prompt_ref_mode`.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_sameparentprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_sameparentprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.57217276` | `0.66357255` | `0.59945439` | `0.58781838` | `180.90 s` | stop |
+
+Conclusion:
+
+Using a same-parent reference prompt is cleaner than same-clip prefix prompting,
+but it still drops far below E2. This is another negative result: the current
+checkpoint cannot be converted into a speaker-only/timbre-only prompt model by
+short fine-tuning from E2. The deployable checkpoint remains E2, and a true
+speaker-only solution likely needs longer training with randomized references
+from the start or a separate pretrained speaker/timbre encoder.

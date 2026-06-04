@@ -251,6 +251,7 @@ class FMAVSRDataset(Dataset):
         visual_feature_name: str = "avsr_enc.npy",
         timbre_condition_name: str | None = None,
         audio_prompt_frames: int = 0,
+        audio_prompt_ref_mode: str = "self_prefix",
         load_energy: bool = False,
     ):
         root = Path(processed_root)
@@ -289,10 +290,33 @@ class FMAVSRDataset(Dataset):
         self.visual_feature_name = visual_feature_name
         self.timbre_condition_name = timbre_condition_name
         self.audio_prompt_frames = max(int(audio_prompt_frames), 0)
+        self.audio_prompt_ref_mode = audio_prompt_ref_mode
+        if self.audio_prompt_ref_mode not in {"self_prefix", "same_parent_next"}:
+            raise ValueError(f"unknown audio_prompt_ref_mode: {self.audio_prompt_ref_mode}")
+        self._same_parent_next = self._build_same_parent_next_refs(clips)
         self.load_energy = load_energy
         print(f"[FMAVSRDataset] split={split}/{subset}  clips={len(self.clips)}")
 
     def __len__(self): return len(self.clips)
+
+    @staticmethod
+    def _build_same_parent_next_refs(clips: list[Path]) -> dict[Path, Path]:
+        by_parent: dict[Path, list[Path]] = {}
+        for clip in clips:
+            by_parent.setdefault(clip.parent, []).append(clip)
+        refs = {}
+        for group in by_parent.values():
+            if len(group) < 2:
+                continue
+            ordered = sorted(group)
+            for i, clip in enumerate(ordered):
+                refs[clip] = ordered[(i + 1) % len(ordered)]
+        return refs
+
+    def _audio_prompt_source(self, clip: Path) -> Path:
+        if self.audio_prompt_ref_mode == "same_parent_next":
+            return self._same_parent_next.get(clip, clip)
+        return clip
 
     def __getitem__(self, idx):
         c = self.clips[idx]
@@ -312,11 +336,20 @@ class FMAVSRDataset(Dataset):
             timbre_cond = np.load(str(c / self.timbre_condition_name)).astype("float32")
         audio_prompt = None
         if self.audio_prompt_frames > 0:
+            prompt_clip = self._audio_prompt_source(c)
+            prompt_lat = lat
+            if prompt_clip != c:
+                prompt_enc = np.load(str(prompt_clip / self.visual_feature_name)).astype("float32")
+                prompt_lat = np.load(str(prompt_clip / "latent.npz"))["latent"].astype("float32")
+                prompt_lat = validate_latent_frame_rate(prompt_lat, prompt_enc.shape[0], prompt_clip)
+                if prompt_lat.shape[0] > _MAX_TA:
+                    prompt_lat = prompt_lat[:_MAX_TA]
+                prompt_lat = normalize_latent(prompt_lat)
             audio_prompt = np.zeros(
-                (self.audio_prompt_frames, lat.shape[1]), dtype=np.float32
+                (self.audio_prompt_frames, prompt_lat.shape[1]), dtype=np.float32
             )
-            n_prompt = min(self.audio_prompt_frames, lat.shape[0])
-            audio_prompt[:n_prompt] = lat[:n_prompt]
+            n_prompt = min(self.audio_prompt_frames, prompt_lat.shape[0])
+            audio_prompt[:n_prompt] = prompt_lat[:n_prompt]
         energy = (
             load_log_rms_energy(c, lat.shape[0]).astype("float32")
             if self.load_energy else None

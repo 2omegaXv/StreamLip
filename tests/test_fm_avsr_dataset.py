@@ -99,6 +99,40 @@ class FMAVSRDatasetTest(unittest.TestCase):
             self.assertEqual(batch["audio_prompt"].shape, (1, 3, 512))
             np.testing.assert_allclose(batch["audio_prompt"][0], expected)
 
+    def test_dataset_can_build_audio_prompt_from_next_same_parent_clip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            np.savez(
+                root / "latent_norm_stats.npz",
+                mean=np.zeros((512,), dtype=np.float32),
+                std=np.ones((512,), dtype=np.float32),
+            )
+            clip_a = root / "pretrain" / "spk" / "00001"
+            clip_b = root / "pretrain" / "spk" / "00002"
+            for clip, value in [(clip_a, 1.0), (clip_b, 7.0)]:
+                clip.mkdir(parents=True)
+                (clip / "avsr_text.txt").write_text("PROMPT\n")
+                np.save(clip / "avsr_enc.npy", np.ones((8, 768), dtype=np.float32))
+                np.savez(
+                    clip / "latent.npz",
+                    latent=np.full((4, 512), value, dtype=np.float32),
+                )
+                np.save(clip / "speaker_emb.npy", np.ones((256,), dtype=np.float32))
+                np.save(clip / "smollm2_h.npy", np.ones((1, 960), dtype=np.float16))
+            clip_list = root / "clips.txt"
+            clip_list.write_text("pretrain/spk/00001\npretrain/spk/00002\n")
+
+            ds = FMAVSRDataset(
+                str(root),
+                clip_list=str(clip_list),
+                audio_prompt_frames=3,
+                audio_prompt_ref_mode="same_parent_next",
+            )
+            item = ds[0]
+
+            self.assertEqual(item["audio_prompt"].shape, (3, 512))
+            np.testing.assert_allclose(item["audio_prompt"], np.full((3, 512), 7.0))
+
     def test_read_clip_text_can_use_text_json_words(self):
         with tempfile.TemporaryDirectory() as tmp:
             clip = Path(tmp)
@@ -844,6 +878,24 @@ class FMAVSRDatasetTest(unittest.TestCase):
                 args = parse_args()
 
             self.assertTrue(args.audio_prompt_cross_attn_pool)
+        finally:
+            sys.argv = old_argv
+
+    def test_parse_args_loads_audio_prompt_ref_mode_from_config(self):
+        old_argv = sys.argv
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+                f.write("audio_prompt_ref_mode: same_parent_next\n")
+                f.flush()
+                sys.argv = [
+                    "scripts/train_fm_avsr.py",
+                    "--config",
+                    f.name,
+                ]
+
+                args = parse_args()
+
+            self.assertEqual(args.audio_prompt_ref_mode, "same_parent_next")
         finally:
             sys.argv = old_argv
 

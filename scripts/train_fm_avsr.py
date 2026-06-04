@@ -136,6 +136,10 @@ def parse_args():
                    help="Dimension of the optional global timbre condition vector.")
     p.add_argument("--audio_prompt_frames", type=int, default=0,
                    help="Use this many normalized Mimi prefix frames as audio prompt tokens.")
+    p.add_argument("--audio_prompt_ref_mode",
+                   choices=["self_prefix", "same_parent_next"],
+                   default="self_prefix",
+                   help="Source clip for training audio prompt construction.")
     p.add_argument("--audio_prompt_dim", type=int, default=0,
                    help="Dimension of each audio prompt token; usually 512 for Mimi latent.")
     p.add_argument("--audio_prompt_pool_cond", action="store_true",
@@ -1130,6 +1134,7 @@ def main():
         visual_feature_name=args.visual_feature_name,
         timbre_condition_name=args.timbre_condition_name,
         audio_prompt_frames=args.audio_prompt_frames,
+        audio_prompt_ref_mode=args.audio_prompt_ref_mode,
         load_energy=mode_uses_energy_supervision(args.energy_condition_mode),
     )
     if args.val_clip_list:
@@ -1142,6 +1147,7 @@ def main():
             visual_feature_name=args.visual_feature_name,
             timbre_condition_name=args.timbre_condition_name,
             audio_prompt_frames=args.audio_prompt_frames,
+            audio_prompt_ref_mode=args.audio_prompt_ref_mode,
             load_energy=mode_uses_energy_supervision(args.energy_condition_mode),
         )
         train_n = len(train_ds)
