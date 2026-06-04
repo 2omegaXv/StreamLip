@@ -1,6 +1,6 @@
 \documentclass{article}
 
-\usepackage[preprint]{assets/fm_avsr_report/neurips_2024}
+\usepackage[preprint]{neurips_2024}
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
@@ -13,7 +13,6 @@
 \usepackage{microtype}
 \usepackage{xcolor}
 \usepackage{graphicx}
-\usepackage{multirow}
 
 \title{FM-AVSR Audio Reconstruction from Visual Speech: Final System Report}
 
@@ -115,7 +114,7 @@ from either the input audio prefix or an external reference audio file.
 
 \begin{figure}[h]
     \centering
-    \includegraphics[width=\linewidth]{assets/fm_avsr_report/system_architecture.png}
+    \includegraphics[width=\linewidth]{assets/system_architecture.png}
     \caption{Implemented FM-AVSR audio reconstruction pipeline. Visual, text,
     speaker, timbre, and audio-prompt conditions are fused by the reconstruction
     model to predict normalized Mimi latents, which are decoded to waveform and
@@ -202,7 +201,7 @@ learns the correction term.
 
 \begin{figure}[h]
     \centering
-    \includegraphics[width=\linewidth]{assets/fm_avsr_report/recon_vs_sampling.png}
+    \includegraphics[width=\linewidth]{assets/recon_vs_sampling.png}
     \caption{The final system uses deterministic residual reconstruction. The
     original FM sampling route learns a vector field from noise to target; the
     final route fixes $\tilde{x}=0$ and $\tau=1$, then predicts an endpoint with
@@ -224,11 +223,11 @@ so the generated MP4 preserves the full input duration.
 
 \begin{figure}[h]
     \centering
-    \includegraphics[width=\linewidth]{assets/fm_avsr_report/silent_ref_pipeline.png}
+    \includegraphics[width=\linewidth]{assets/silent_ref_pipeline.png}
     \caption{Silent-video inference mode. Optional reference audio controls
     timbre and prompt conditions. If the reference is absent, zero prompt and
     zero timbre are used. The output video keeps the full input duration and is
-    saved as \texttt{<exp>\_pred\_full.mp4}.}
+    saved as \texttt{\string<exp\string>\_pred\_full.mp4}.}
     \label{fig:silent_ref}
 \end{figure}
 
@@ -240,9 +239,9 @@ so the generated MP4 preserves the full input duration.
 
 The final configuration and checkpoint are:
 \begin{itemize}
-    \item \textbf{Config:} \texttt{configs/fm\_avsr\_lipavsr\_59144\_timbre3s\_audioprompt38\_pool\_promptstats005\_residual\_samplecorr02\_from1000\_recon\_textjson\_wordts.yaml}
-    \item \textbf{Checkpoint:} \texttt{runs/fm\_avsr/lipavsr\_59144\_timbre3s\_audioprompt38\_pool\_promptstats005\_residual\_samplecorr02\_from1000\_recon\_textjson\_wordts\_v1/step\_001500.pt}
-    \item \textbf{Residual base:} \texttt{runs/fm\_avsr/lipavsr\_59144\_timbre3s\_audioprompt38\_pool\_from4000\_recon\_textjson\_wordts\_v1/step\_005000.pt}
+    \item \textbf{Config:} \path{configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_from1000_recon_textjson_wordts.yaml}
+    \item \textbf{Checkpoint:} \path{runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_from1000_recon_textjson_wordts_v1/step_001500.pt}
+    \item \textbf{Residual base:} \path{runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_from4000_recon_textjson_wordts_v1/step_005000.pt}
 \end{itemize}
 
 Key training choices are deterministic reconstruction loss
@@ -320,7 +319,7 @@ Generated MP4 duration & 8.000 s \\
 Dummy target latent shape & $(100,512)$ \\
 Audio prompt shape & $(38,512)$, nonzero \\
 Timbre condition shape & $(1024)$, nonzero \\
-Output & \texttt{eval\_out/trump\_silent\_ref\_verify/trump\_silent\_ref\_verify\_pred\_full.mp4} \\
+Output & \path{eval_out/trump_silent_ref_verify/trump_silent_ref_verify_pred_full.mp4} \\
 \bottomrule
 \end{tabular}
 \caption{Silent-video reference-audio end-to-end verification.}
