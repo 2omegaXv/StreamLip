@@ -27,3 +27,15 @@ data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4
 data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4
 data/assets/trump_silent_ref_demo/trump_silent_ref_demo_full_pred_post3s.mp4
 ```
+
+The poster text example is taken from the processed Trump AVSR transcript:
+
+```text
+eval_out/trump_raw_prompt_pipeline/processed/custom/trump/00001/avsr_text_lipavsr.txt
+```
+
+It includes the phrase:
+
+```text
+OUR COUNTRY IS WINNING ... WE'RE WINNING SO MUCH ... WE WINNING TOO MUCH ...
+```

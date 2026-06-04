@@ -382,11 +382,11 @@ def build():
     add_captioned_image(slide, ASSET_DIR / "trump_generated_wave.png", "generated waveform", col3 + 0.45, top + 7.55, col_w - 0.9, 1.2)
     add_text(
         slide,
-        "AVSR text example: \"OUR COUNTRY IS WINNING AND IN FACT WE'RE WINNING SO MUCH ...\"",
+        "Auto-AVSR text: \"OUR COUNTRY IS WINNING ... WE'RE WINNING SO MUCH ... WE WINNING TOO MUCH ...\"",
         col3 + 0.45,
         top + 9.75,
         col_w - 0.9,
-        0.85,
+        0.9,
         15,
         True,
         NAVY,
@@ -579,12 +579,13 @@ def build():
             "poster/fm_avsr_poster.pdf",
             "poster/fm_avsr_poster_preview.png",
             "data/assets/trump_silent_ref_demo/*.mp4",
+            "eval_out/trump_raw_prompt_pipeline/.../avsr_text_lipavsr.txt",
         ],
         col3 + 0.35,
         top + 32.65,
         col_w - 0.7,
-        2.6,
-        14,
+        3.25,
+        13,
     )
     add_text(
         slide,
