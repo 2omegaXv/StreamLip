@@ -811,6 +811,24 @@ class FMAVSRDatasetTest(unittest.TestCase):
         finally:
             sys.argv = old_argv
 
+    def test_parse_args_loads_no_audio_prompt_cross_attn_from_config(self):
+        old_argv = sys.argv
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+                f.write("no_audio_prompt_cross_attn: true\n")
+                f.flush()
+                sys.argv = [
+                    "scripts/train_fm_avsr.py",
+                    "--config",
+                    f.name,
+                ]
+
+                args = parse_args()
+
+            self.assertTrue(args.no_audio_prompt_cross_attn)
+        finally:
+            sys.argv = old_argv
+
     def test_prepare_conditions_can_ablate_video_or_text(self):
         import torch
 

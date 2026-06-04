@@ -216,6 +216,7 @@ class FMHead(nn.Module):
         audio_prompt_pool_cond: bool = False,
         audio_prompt_stat_pool_cond: bool = False,
         audio_prompt_learned_pool_cond: bool = False,
+        audio_prompt_cross_attn: bool = True,
         ctc_vocab_size: int = 0,
         ctc_topk: int = 0,
         ctc_token_emb_dim: int = 0,
@@ -229,6 +230,7 @@ class FMHead(nn.Module):
         self.audio_prompt_pool_cond = audio_prompt_pool_cond
         self.audio_prompt_stat_pool_cond = audio_prompt_stat_pool_cond
         self.audio_prompt_learned_pool_cond = audio_prompt_learned_pool_cond
+        self.audio_prompt_cross_attn = audio_prompt_cross_attn
         self.ctc_topk = ctc_topk
         self.ctc_token_emb_dim = ctc_token_emb_dim
         ctc_cond_dim = ctc_token_emb_dim + ctc_topk if ctc_topk > 0 else 0
@@ -373,10 +375,11 @@ class FMHead(nn.Module):
                 weights = torch.softmax(score, dim=1).to(dtype=prompt_tokens.dtype)
                 pooled = (prompt_tokens * weights).sum(dim=1)
                 cond = cond + self.audio_prompt_learned_pool_proj(pooled).unsqueeze(1)
-            cond_tokens = (
-                prompt_tokens if cond_tokens is None
-                else torch.cat([cond_tokens, prompt_tokens], dim=1)
-            )
+            if self.audio_prompt_cross_attn:
+                cond_tokens = (
+                    prompt_tokens if cond_tokens is None
+                    else torch.cat([cond_tokens, prompt_tokens], dim=1)
+                )
         if cond_tokens is None:
             return cond
         return cond, cond_tokens
@@ -441,7 +444,11 @@ class FMHead(nn.Module):
             and self.use_text_token_cross_attn
         ):
             prompt_len = 0
-            if self.audio_prompt_dim > 0 and audio_prompt is not None:
+            if (
+                self.audio_prompt_cross_attn
+                and self.audio_prompt_dim > 0
+                and audio_prompt is not None
+            ):
                 prompt_len = audio_prompt.shape[1]
             if prompt_len > 0:
                 prompt_mask = torch.ones(

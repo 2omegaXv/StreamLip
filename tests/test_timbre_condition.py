@@ -114,6 +114,24 @@ class TimbreConditionTest(unittest.TestCase):
 
         self.assertGreater(float((cond_a - cond_b).detach().abs().sum()), 0.0)
 
+    def test_audio_prompt_tokens_can_be_excluded_from_cross_attention(self):
+        fm = FMHeadAVSR(
+            n_layers=1,
+            use_cross_attn=True,
+            audio_prompt_dim=512,
+            audio_prompt_pool_cond=True,
+            audio_prompt_cross_attn=False,
+        )
+        v = torch.zeros(2, 4, 768)
+        h = torch.zeros(2, 4, 960)
+        spk = torch.zeros(2, 256)
+        prompt = torch.ones(2, 3, 512)
+
+        built = fm._build_cond(v, h, spk, audio_prompt=prompt)
+
+        self.assertFalse(isinstance(built, tuple))
+        self.assertEqual(tuple(built.shape), (2, 4, 512))
+
     def test_audio_prompt_stat_pool_condition_starts_as_noop(self):
         torch.manual_seed(0)
         mean_pool = FMHeadAVSR(
