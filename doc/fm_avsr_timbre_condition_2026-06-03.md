@@ -768,6 +768,49 @@ setup and early-stopped at step1250. Its small-val recon corr was `0.58416606`,
 below both the `0.05` run at step1250 (`0.58428280`) and the baseline at
 step1250 (`0.58424845`), so no full-val eval was run.
 
+## Lip-AVSR Text Source Check
+
+The eval path now supports `text_source=lipavsr`, which reads
+`avsr_text_lipavsr.txt` and uses a separate `smollm2_h_lipavsr.npy` hidden-state
+cache. A val1000 cache was extracted with `scripts/extract_smollm2_h.py
+--text_source lipavsr`, then the same two step1500 timbre-prompt checkpoints were
+re-evaluated with `--text_source lipavsr`, `--metric_start_frame 38`, and
+`--use_recon`.
+
+| Run | Text source | Eval corr | Eval MSE | Eval MAE |
+| --- | --- | ---: | ---: | ---: |
+| previous best 59k residual sample-corr | text_json | 0.58177344 | 0.66763517 | 0.60181215 |
+| previous best 59k residual sample-corr | lipavsr | 0.57825541 | 0.67162016 | 0.60370255 |
+| prompt-consistency stats, 0.05 | text_json | 0.58184180 | 0.66763106 | 0.60181897 |
+| prompt-consistency stats, 0.05 | lipavsr | 0.57833471 | 0.67162028 | 0.60371083 |
+
+The drop from GT `text_json` to `avsr_text_lipavsr.txt` is about `0.00351` corr
+for both checkpoints. That is measurable but not severe; it is much smaller than
+the gap between the current platform and a 0.6 target, so the lip-AVSR text
+source alone is not the main bottleneck.
+
+## Text Condition Takeaway
+
+The strongest supported conclusion is that this architecture is primarily driven
+by the visual/video condition plus speaker/timbre conditioning, while the current
+SmolLM2 text path has only a small marginal effect.
+
+Earlier condition ablations in `doc/fm_avsr_experiment_status_2026-06-01.md`
+showed that `video_only` and `shuffle_text` were effectively tied in the sampled
+FM setup (`0.3207` vs `0.3195` held-out sampled corr at step3000), while
+`text_only` was near zero (`0.0478` at step1500 vs `0.2945` for `video_only`).
+The `text_json + word_timestamps` real-vs-shuffled check also showed only about
+`+0.003` sample-corr advantage for real text at step1000.
+
+For the final timbre-prompt residual model, replacing GT `text_json` with the
+new `avsr_text_lipavsr.txt` source reduced full-val corr only from `0.58184180`
+to `0.57833471`, an absolute drop of `0.00350709` or about `0.6%` relative.
+This says text accuracy is not the dominant bottleneck in the current model.
+It does not prove text is intrinsically useless, nor does it prove that the final
+timbre-prompt residual model has a strict same-config no-text drop of only 10%;
+it says that, under the current condition fusion and deterministic latent
+reconstruction objective, visual/video and timbre conditions dominate the result.
+
 ## Interpretation
 
 Manual timbre control is practical in this codebase. The mean/std prompt is a
@@ -806,6 +849,61 @@ same-speaker external prompts, stronger prompt fusion, an explicit speaker /
 prompt consistency loss, or a stronger sampled/denoising generative objective
 instead of continuing to tune deterministic recon losses.
 
+## Raw MP4 Pipeline Timing
+
+A single unseen LRS3 test clip was timed end-to-end from raw mp4 with audio
+removed:
+
+```text
+/mnt/pfs/group-jt/zihan.guo/droid/LRS3/lrs3/test/test/GSf6nijSSdA/00007.mp4
+duration: 6.144 s, 154 frames at 25 fps
+output dir: eval_out/raw_mp4_pipeline_timing_GSf6nijSSdA_00007
+```
+
+Because the input audio was deliberately stripped, the final timbre/audio-prompt
+inputs were zero placeholders. Therefore the final generated audio is only a
+runtime smoke test, not a valid quality sample. The raw-video timing path also
+uses uniform text alignment, because a raw mp4 plus Auto-AVSR text does not
+provide GT word timestamps.
+
+Model load time was measured separately from per-clip runtime:
+
+| Stage | Load sec | Runtime sec |
+| --- | ---: | ---: |
+| strip audio with ffmpeg | - | 0.369 |
+| decode video frames | - | 0.149 |
+| face_alignment S3FD + 2DFAN init | 11.229 | - |
+| face detect, align, lip crop | - | 26.720 |
+| write lip/face arrays | - | 0.398 |
+| Auto-AVSR load | 10.759 | - |
+| Auto-AVSR encode + CTC text | - | 0.549 |
+| SmolLM2 load | 16.419 | - |
+| SmolLM2 hidden extraction | - | 0.396 |
+| speaker encoder load | 2.489 | - |
+| speaker embedding extraction | - | 0.319 |
+| no-audio placeholder files | - | 0.015 |
+| FM residual base + Mimi load | 7.662 | - |
+| FM reconstruct, zero timbre/prompt | - | 0.210 |
+| Mimi decode + write wav | - | 0.451 |
+| mux post-3s video with pred audio | - | 0.100 |
+
+Totals:
+
+```text
+load_total_sec: 48.558
+runtime_total_sec_excluding_load: 29.676
+realtime factor over full 6.144s clip: 4.83x slower than realtime
+realtime factor over post-prompt 3.104s output: 9.56x slower than realtime
+```
+
+The current unoptimized raw-mp4 pipeline is not realtime. The bottleneck is not
+the FM head or Mimi decoder: FM reconstruction took `0.210 s`, and Mimi decode
+took `0.451 s`. The bottleneck is the offline face-alignment preprocessing,
+especially S3FD/FAN-based face detect, alignment, and lip crop (`26.720 s` for a
+6.144 s clip). Realtime would require replacing or streaming/optimizing that
+front-end, for example with a faster tracked face ROI, batched detector reuse,
+or bypassing full face_alignment when the input is already cropped like LRS3.
+
 ## Verification
 
 Code support for `timbre_cond` and `audio_prompt` was covered by unit tests:
@@ -830,5 +928,8 @@ Code support for `timbre_cond` and `audio_prompt` was covered by unit tests:
 - `python -m py_compile src/streaminlip/v2/fm_head.py scripts/train_fm_avsr.py scripts/eval_fm_avsr.py`
 - `uv run python -m unittest tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_masked_prompt_timbre_stats_loss_matches_prompt_mean_and_std tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_combine_training_losses_can_include_prompt_timbre_stats_loss -v`
 - `python -m py_compile scripts/train_fm_avsr.py`
+- `uv run python -m unittest tests.test_fm_avsr_dataset tests.test_eval_fm_avsr -v`
+- `python -m py_compile src/streaminlip/fm_avsr_dataset.py scripts/eval_fm_avsr.py scripts/train_fm_avsr.py scripts/extract_smollm2_h.py`
+- `git diff --check -- src/streaminlip/fm_avsr_dataset.py scripts/eval_fm_avsr.py scripts/train_fm_avsr.py scripts/extract_smollm2_h.py tests/test_fm_avsr_dataset.py doc/fm_avsr_timbre_condition_2026-06-03.md`
 
 All individual training/eval runs in this note were kept under the 1-hour limit.

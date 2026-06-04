@@ -742,6 +742,77 @@ overlap:     0
 
 Interpretation: the `>0.5` validation target is achieved for discrete Mimi `codebook=0` top-1 accuracy when inference uses sequence-level Viterbi decoding over the model's top-5 candidates plus a train-only bigram prior. The base neural model alone remains below `0.5`; the improvement comes from adding an explicit local speech-code transition prior at decode time.
 
+## 2026-06-03 full-audio generation target reset
+
+The `codebook0 + Viterbi` result does not satisfy the stricter full-audio objective:
+
+```text
+vision + text -> complete audio codes/latents -> decoded audio
+held-out audio correlation > 0.5
+usable on arbitrary no-audio video + text
+```
+
+Reason: the `0.5136` metric only measures Mimi `codebook0` top-1 token accuracy. The listening probe that produced high waveform correlation replaced only `codebook0` and kept `codebook1-31` from ground truth:
+
+```text
+predicted codebook0 + GT codebook1-31 -> Mimi decode
+```
+
+That is a diagnostic, not a real generation path. It cannot run on arbitrary no-audio video because the remaining 31 codebooks are unavailable.
+
+### 8-codebook AR diagnostic
+
+I added a minimal multi-codebook AR diagnostic script:
+
+```text
+scripts/train_mimi_multi_code_avsr.py
+tests/test_mimi_multi_code_avsr.py
+```
+
+It predicts the first `n_codebooks` Mimi codebooks jointly from:
+
+```text
+avsr_enc.npy + speaker_emb.npy + previous code token history
+```
+
+Two 500-step runs were tested on the `80-260` train split and the clean `120-220` held-out split using Moshiko Mimi codes.
+
+Codebook-major sequence order:
+
+```text
+run: runs/mimi_multi_code_avsr/len80_260_65802_8q_ar_v1
+
+step 100 val_acc: 0.0472
+step 200 val_acc: 0.0593
+step 300 val_acc: 0.0652
+step 400 val_acc: 0.0698
+step 500 val_acc: 0.0725
+
+step 500 per-codebook acc:
+[0.2891, 0.0802, 0.0360, 0.0450, 0.0309, 0.0348, 0.0358, 0.0286]
+```
+
+Time-major sequence order, allowing residual codebooks to attend to lower codebooks from the same frame:
+
+```text
+run: runs/mimi_multi_code_avsr/len80_260_65802_8q_ar_timemajor_v1
+
+step 100 val_acc: 0.0462
+step 200 val_acc: 0.0578
+step 300 val_acc: 0.0642
+step 400 val_acc: 0.0682
+step 500 val_acc: 0.0712
+
+step 500 per-codebook acc:
+[0.2828, 0.0778, 0.0355, 0.0445, 0.0296, 0.0349, 0.0363, 0.0286]
+```
+
+Conclusion: a small from-scratch multi-codebook AR head does not learn enough in the 1-2h iteration budget. Residual codebooks remain near random/weak unigram behavior, and this route cannot currently produce high-quality complete audio. The next credible direction for the stricter objective is not another shallow multi-codebook head, but a stronger pretrained audio-token prior or staged codebook modeling:
+
+1. Keep the successful `codebook0` predictor as the low-frequency/semantic anchor.
+2. Train conditional residual-codebook models that see predicted/GT lower codebooks, or use a pretrained Mimi/Moshi-style prior to complete residual streams.
+3. Evaluate true decoded audio from fully predicted codebooks, not GT-swapped diagnostic audio.
+
 Recommended next architecture direction:
 
 1. Use Mimi only as the codec.
@@ -1489,4 +1560,1329 @@ Conclusion:
 Frame-level video cross-attention does not break the ~0.37 clean held-out plateau.
 It increases training accuracy faster, but validation drops after step 1500.
 This supports the same diagnosis as the larger/no-reg AR run: the current condition signal and small supervised head can overfit, but do not generalize enough for >0.5.
+```
+
+## 2026-06-03 residual-codebook teacher-lower diagnostic
+
+After the `codebook0 + Viterbi` probe, I checked whether the remaining Mimi residual codebooks are easy to complete if lower codebooks are available. This is an upper-bound diagnostic, not a deployable generation path, because it gives the model GT lower codebooks for each target residual codebook during validation:
+
+```text
+target q1 sees GT q0
+target q2 sees GT q0,q1
+...
+target q7 sees GT q0..q6
+```
+
+Added files:
+
+```text
+scripts/train_mimi_residual_code_avsr.py
+tests/test_mimi_residual_code_avsr.py
+```
+
+Verification:
+
+```bash
+python -m py_compile scripts/train_mimi_residual_code_avsr.py
+uv run python tests/test_mimi_residual_code_avsr.py
+uv run python tests/test_mimi_multi_code_avsr.py
+```
+
+Run:
+
+```bash
+uv run python scripts/train_mimi_residual_code_avsr.py \
+  --data_root /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed \
+  --code_cache_root data/moshiko_mimi_code_cache_len80_260_66802_all \
+  --clip_list configs/eval_splits/pretrain_len80_260_train66802_except_heldout_seed71.txt \
+  --val_clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --run_name len80_260_65802_q1_7_teacherlower_v1 \
+  --n_total_codebooks 8 \
+  --start_codebook 1 \
+  --end_codebook 8 \
+  --dim 384 \
+  --n_layers 3 \
+  --n_heads 6 \
+  --dropout 0.2 \
+  --label_smoothing 0.08 \
+  --batch_size 48 \
+  --num_workers 8 \
+  --lr 0.0003 \
+  --weight_decay 0.2 \
+  --max_steps 500 \
+  --eval_every 100 \
+  --save_every 500
+```
+
+Validation curve:
+
+```text
+step 100: val_acc 0.0362, train_acc 0.0398
+step 200: val_acc 0.0389, train_acc 0.0390
+step 300: val_acc 0.0411, train_acc 0.0376
+step 400: val_acc 0.0428, train_acc 0.0432
+step 500: val_acc 0.0440, train_acc 0.0432
+```
+
+Step 500 per-residual-codebook accuracy:
+
+```text
+q1: 0.0781
+q2: 0.0384
+q3: 0.0499
+q4: 0.0342
+q5: 0.0379
+q6: 0.0390
+q7: 0.0308
+```
+
+Interpretation:
+
+```text
+Even with GT lower codebooks, a small supervised residual-codebook head cannot predict q1..q7 on held-out clips.
+The residual streams are not a simple deterministic completion of q0 plus local AVSR/speaker conditions.
+This makes the "predict codebook0, then cheaply fill residual codebooks" path unlikely to produce complete high-quality audio within the 1-2 hour iteration budget.
+```
+
+Current objective audit:
+
+```text
+Required: arbitrary no-audio video + text -> complete decoded audio with held-out corr > 0.5.
+Satisfied by codebook0 Viterbi? No. It only predicts one coarse Mimi stream.
+Satisfied by GT-swap listening probes? No. They keep GT codebook1-31.
+Satisfied by residual teacher-lower probe? No. It is an upper-bound diagnostic and val_acc is only 0.0440 for q1..q7.
+Status: not achieved.
+```
+
+Next credible direction:
+
+```text
+Stop spending short runs on shallow direct residual-codebook heads.
+Use Mimi as codec, but put the generation burden on a pretrained speech/audio-token prior or a teacher-distillation path with explicit duration/lip alignment.
+The local Moshiko checkpoint is still the most relevant available prior, but direct teacher-forced prior probes were weak; using it effectively likely requires a proper adapter/generation interface rather than another small classifier head.
+```
+
+## 2026-06-03 Pocket TTS teacher-to-GT correlation gate
+
+I added a direct teacher-audio evaluation script:
+
+```text
+scripts/eval_teacher_audio.py
+tests/test_eval_teacher_audio.py
+```
+
+Purpose:
+
+```text
+Check whether text-only TTS teacher audio is already close to the original clip audio
+after simple duration normalization.
+```
+
+This is important because the active metric is correlation against the original GT audio, not just speech naturalness. If teacher audio has near-zero waveform correlation to GT, then it can be useful as a natural-speech prior or perceptual teacher, but it cannot directly satisfy or supervise the current `corr > 0.5` target without explicit timing/prosody/lip alignment.
+
+Verification:
+
+```bash
+python -m py_compile scripts/eval_teacher_audio.py
+uv run python tests/test_eval_teacher_audio.py
+```
+
+Existing Pocket TTS teacher-cache samples:
+
+```bash
+uv run python scripts/eval_teacher_audio.py \
+  --manifest data/teacher_cache/pocket_tts_probe/manifest.jsonl \
+  --output_csv eval_out/teacher_audio/pocket_tts_probe_metrics.csv \
+  --summary_json eval_out/teacher_audio/pocket_tts_probe_summary.json
+
+uv run python scripts/eval_teacher_audio.py \
+  --manifest data/teacher_cache/pocket_tts_smoke/manifest.jsonl \
+  --output_csv eval_out/teacher_audio/pocket_tts_smoke_metrics.csv \
+  --summary_json eval_out/teacher_audio/pocket_tts_smoke_summary.json
+```
+
+Results:
+
+```text
+pocket_tts_probe:
+  n: 1
+  duration_ratio_mean: 0.4572
+  corr_crop_mean: -0.0050
+  corr_resampled_mean: 0.0009
+  si_sdr_resampled_mean: -60.70 dB
+
+pocket_tts_smoke:
+  n: 1
+  duration_ratio_mean: 0.9521
+  corr_crop_mean: 0.0005
+  corr_resampled_mean: -0.0060
+  si_sdr_resampled_mean: -44.48 dB
+```
+
+Interpretation:
+
+```text
+Pocket TTS produces intelligible/natural speech, but it is not waveform-aligned or prosody-aligned to the original LRS3 clip.
+Even when duration is close, waveform correlation to GT is near zero.
+Therefore a plain text-only TTS teacher cannot be used as a direct target for the current GT-correlation metric.
+```
+
+Consequence for next experiments:
+
+```text
+1. Do not train a student directly to match Pocket TTS audio if the validation gate remains GT waveform/latent corr.
+2. Pocket TTS can still be used as an auxiliary natural-speech prior, ASR/perceptual teacher, or curriculum source.
+3. To improve GT corr, the prior must be conditioned on frame-level timing from the video/GT transcript, or the objective must move to ASR/perceptual/lip-sync metrics.
+4. The strongest missing component remains a pretrained speech-token generator that can accept explicit timing/conditioning adapters, not another text-only teacher cache.
+```
+
+## 2026-06-03 AVSR-to-audio-energy timing probe
+
+I added a linear diagnostic for the most basic timing/prosody signal:
+
+```text
+scripts/eval_energy_envelope_avsr.py
+tests/test_eval_energy_envelope_avsr.py
+```
+
+The script fits a ridge regression from frame-level `avsr_enc.npy` features to the original `audio.wav` log-RMS energy envelope at approximately 12.5 Hz:
+
+```text
+avsr_enc.npy, 25 Hz -> downsample/interpolate to 12.5 Hz
+audio.wav -> per-frame log RMS envelope
+ridge(avsr_enc -> log RMS) trained on train clips
+evaluate per-clip envelope corr on held-out clips
+```
+
+This checks whether the current visual/AVSR condition contains enough coarse rhythm and mouth-activity information. It is not a full audio-generation model.
+
+Verification:
+
+```bash
+python -m py_compile scripts/eval_energy_envelope_avsr.py
+uv run python tests/test_eval_energy_envelope_avsr.py
+```
+
+Smoke run:
+
+```bash
+uv run python scripts/eval_energy_envelope_avsr.py \
+  --train_clip_list configs/eval_splits/pretrain_len120_220_train12000_seed43.txt \
+  --val_clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --train_n 20 \
+  --val_n 10 \
+  --output_dir runs/diagnostics/energy_envelope_avsr_smoke \
+  --l2 100.0
+```
+
+Smoke result:
+
+```text
+train mean_corr: 0.7991
+val mean_corr:   0.5518
+val weighted:    0.5589
+```
+
+Larger diagnostic:
+
+```bash
+uv run python scripts/eval_energy_envelope_avsr.py \
+  --train_clip_list configs/eval_splits/pretrain_len120_220_train12000_seed43.txt \
+  --val_clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --train_n 2000 \
+  --val_n 1000 \
+  --output_dir runs/diagnostics/energy_envelope_avsr_len120_220_train2k_val1k_l2_100 \
+  --l2 100.0
+```
+
+Larger diagnostic result:
+
+```text
+train mean_corr:    0.7023
+train weighted:     0.7038
+val mean_corr:      0.7031
+val median_corr:    0.7604
+val weighted_corr:  0.7053
+val min/max_corr:  -0.1174 / 0.9455
+```
+
+Interpretation:
+
+```text
+The current AVSR feature stream does contain a strong held-out signal for coarse audio energy/timing.
+The previous ~0.35 full-latent/sample plateau is therefore not explained by a total absence of visual timing information.
+The bottleneck is more likely that the current FM/codebook heads do not factor the problem into easier timing/prosody plus spectral/detail generation.
+```
+
+Next useful architecture experiment:
+
+```text
+Add an explicit energy/prosody auxiliary path:
+1. Compute per-latent-frame GT log-RMS energy from audio.wav in the dataset.
+2. Add an energy prediction head from the same AVSR/text/speaker condition.
+3. Feed predicted or teacher-forced energy into the FM/latent generator through frame-level conditioning.
+4. Track val_energy_corr alongside val_sample_corr/recon_corr.
+5. Run an ablation: no-energy vs GT-energy vs predicted-energy conditioning.
+```
+
+This is a more plausible 1-2 hour experiment than another unconstrained latent/codebook head, because the linear probe shows the needed timing signal is learnable and generalizes.
+
+## 2026-06-03 GT-energy recon gate and predicted-energy path
+
+I added frame-level log-RMS energy support to the FM AVSR pipeline:
+
+```text
+src/streaminlip/fm_avsr_dataset.py
+  compute_log_rms_energy(audio, n_frames)
+  load_log_rms_energy(clip, n_frames)
+  FMAVSRDataset(load_energy=False by default)
+
+scripts/train_fm_avsr.py
+  energy_condition_mode: none | gt | pred
+  lambda_energy for predicted-energy supervision
+  metrics.csv includes loss_energy
+  val_metrics.csv includes val/train energy metrics
+
+scripts/eval_fm_avsr.py
+  energy_condition_mode: none | gt | pred
+```
+
+Important implementation note:
+
+```text
+load_energy defaults to false so normal FM training does not read audio.wav in every dataloader item.
+GT/pred energy experiments explicitly enable it because they need audio.wav-derived energy labels during training.
+```
+
+### GT-energy upper-bound gate
+
+Config:
+
+```text
+configs/fm_avsr_len120_220_12000_gt_energy_recon_gate.yaml
+```
+
+Command used:
+
+```bash
+uv run python scripts/train_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_gt_energy_recon_gate.yaml
+```
+
+This is an upper-bound diagnostic because it feeds energy computed from each target `audio.wav` into the latent recon head. It is not valid no-audio inference.
+
+Held-out recon results:
+
+```text
+step   500: val_recon_corr 0.4827, train_recon_corr 0.4776
+step  1000: val_recon_corr 0.5103, train_recon_corr 0.5202
+step  1500: val_recon_corr 0.5179, train_recon_corr 0.5609  <-- best val
+step  2000: val_recon_corr 0.5158, train_recon_corr 0.5621
+step  2500: val_recon_corr 0.5125, train_recon_corr 0.6003
+step  3000: val_recon_corr 0.5072, train_recon_corr 0.6236
+```
+
+Artifacts:
+
+```text
+runs/fm_avsr/len120_220_12000_gt_energy_recon_gate_v1/metrics.csv
+runs/fm_avsr/len120_220_12000_gt_energy_recon_gate_v1/val_metrics.csv
+runs/fm_avsr/len120_220_12000_gt_energy_recon_gate_v1/gt_energy_recon_curve.svg
+runs/fm_avsr/len120_220_12000_gt_energy_recon_gate_v1/step_001500.pt
+runs/fm_avsr/len120_220_12000_gt_energy_recon_gate_v1/step_003000.pt
+```
+
+Correct held-out audio eval command:
+
+```bash
+uv run python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_gt_energy_recon_gate.yaml \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --ckpt runs/fm_avsr/len120_220_12000_gt_energy_recon_gate_v1/step_001500.pt \
+  --use_recon \
+  --n 3 \
+  --save_gt \
+  --output_dir eval_out/gt_energy_recon_gate_step1500_true_heldout3
+```
+
+Output:
+
+```text
+eval_out/gt_energy_recon_gate_step1500_true_heldout3/0000_gt.wav
+eval_out/gt_energy_recon_gate_step1500_true_heldout3/0000_pred.wav
+eval_out/gt_energy_recon_gate_step1500_true_heldout3/0001_gt.wav
+eval_out/gt_energy_recon_gate_step1500_true_heldout3/0001_pred.wav
+eval_out/gt_energy_recon_gate_step1500_true_heldout3/0002_gt.wav
+eval_out/gt_energy_recon_gate_step1500_true_heldout3/0002_pred.wav
+```
+
+Waveform correlation on these decoded samples was near zero:
+
+```text
+0000_pred.wav wav_corr=-0.0199
+0001_pred.wav wav_corr=-0.0027
+0002_pred.wav wav_corr= 0.0101
+```
+
+Interpretation:
+
+```text
+1. GT energy clearly helps latent recon: held-out corr crosses 0.5 and peaks around 0.518.
+2. The gain is not enough to declare the real objective solved, because GT energy is derived from target audio.
+3. Best held-out checkpoint is step_001500; after that train corr rises while val corr falls slightly, indicating mild overfit.
+4. Latent corr and waveform corr are different. Mimi decode can have low waveform corr even when latent corr improves, so listening and perceptual/ASR metrics are still necessary.
+```
+
+### Predicted-energy path
+
+I then added a real no-audio path:
+
+```text
+energy_condition_mode: pred
+```
+
+Behavior:
+
+```text
+train:
+  video/text/speaker -> predict frame-level log-RMS energy
+  supervised by GT energy from audio.wav with lambda_energy
+  predicted energy is fed into the latent recon/FM head
+
+eval/inference:
+  video/text/speaker -> predict energy
+  predicted energy is fed into the latent recon/FM head
+  no target audio energy is used
+```
+
+Config:
+
+```text
+configs/fm_avsr_len120_220_12000_pred_energy_recon.yaml
+```
+
+Debug smoke passed:
+
+```text
+run_name: debug_pred_energy_recon
+max_steps: 3
+val energy corr: 0.0259 -> 0.0428 -> 0.0501
+val recon corr:  0.0089 -> 0.0113 -> 0.0165
+checkpoint: runs/fm_avsr/debug_pred_energy_recon/step_000003.pt
+```
+
+Next experiment:
+
+```bash
+uv run python scripts/train_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_pred_energy_recon.yaml
+```
+
+Decision gate:
+
+```text
+If predicted-energy val_energy_corr quickly approaches the linear probe level (~0.70) and val_recon_corr improves toward the GT-energy gate (~0.52), this is the best current path.
+If val_energy_corr is high but val_recon_corr remains near the old plateau, the latent head is still the bottleneck.
+If val_energy_corr is low, the integrated energy head is underpowered or poorly weighted, despite the separate linear probe showing the signal exists.
+```
+
+## 2026-06-03 Predicted-energy recon run result
+
+Config:
+
+```text
+configs/fm_avsr_len120_220_12000_pred_energy_recon.yaml
+```
+
+Run:
+
+```bash
+uv run python scripts/train_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_pred_energy_recon.yaml
+```
+
+I stopped the run early after step 2000 validation because the validation recon metric was trending down while the energy metric had already saturated.
+The process had reached step 2145; the saved checkpoint is step 1500.
+
+Validation results:
+
+```text
+step   500: val_energy_corr 0.6920, val_recon_corr 0.4058, train_recon_corr 0.3990
+step  1000: val_energy_corr 0.7035, val_recon_corr 0.4225, train_recon_corr 0.4609  <-- best val recon
+step  1500: val_energy_corr 0.7065, val_recon_corr 0.4173, train_recon_corr 0.4628
+step  2000: val_energy_corr 0.7055, val_recon_corr 0.4125, train_recon_corr 0.5193
+```
+
+Artifacts:
+
+```text
+runs/fm_avsr/len120_220_12000_pred_energy_recon_v1/metrics.csv
+runs/fm_avsr/len120_220_12000_pred_energy_recon_v1/val_metrics.csv
+runs/fm_avsr/len120_220_12000_pred_energy_recon_v1/pred_energy_recon_curve.svg
+runs/fm_avsr/len120_220_12000_pred_energy_recon_v1/step_001500.pt
+```
+
+Held-out audio eval command:
+
+```bash
+uv run python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_pred_energy_recon.yaml \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --ckpt runs/fm_avsr/len120_220_12000_pred_energy_recon_v1/step_001500.pt \
+  --use_recon \
+  --n 3 \
+  --save_gt \
+  --output_dir eval_out/pred_energy_recon_step1500_true_heldout3
+```
+
+Output:
+
+```text
+eval_out/pred_energy_recon_step1500_true_heldout3/0000_gt.wav
+eval_out/pred_energy_recon_step1500_true_heldout3/0000_pred.wav
+eval_out/pred_energy_recon_step1500_true_heldout3/0001_gt.wav
+eval_out/pred_energy_recon_step1500_true_heldout3/0001_pred.wav
+eval_out/pred_energy_recon_step1500_true_heldout3/0002_gt.wav
+eval_out/pred_energy_recon_step1500_true_heldout3/0002_pred.wav
+```
+
+Waveform correlation on the three decoded held-out samples:
+
+```text
+0000_pred.wav wav_corr=-0.0020
+0001_pred.wav wav_corr=-0.0022
+0002_pred.wav wav_corr=-0.0093
+```
+
+Interpretation:
+
+```text
+1. The integrated predicted-energy head works: held-out energy corr reaches ~0.70, matching the separate linear probe.
+2. Despite good predicted energy, latent recon stays around 0.41-0.42 and does not approach the GT-energy upper-bound of ~0.518.
+3. Therefore coarse energy/timing is not the main remaining bottleneck. The current latent head cannot recover enough spectral/content detail from video+text+speaker+energy.
+4. The train/val gap widens after step 1000: train_recon_corr rises to 0.519 while val_recon_corr falls to 0.4125. More steps on this architecture are unlikely to solve generalization.
+```
+
+Practical next step:
+
+```text
+Do not continue this predicted-energy recon architecture as-is.
+The next likely breakthrough requires changing the audio target/architecture, not just adding another scalar condition.
+Recommended next experiment: residual target factorization or pretrained speech-token prior.
+```
+
+Recommended candidate experiments:
+
+```text
+A. Residual latent prediction after a deterministic baseline:
+   Train a small baseline recon head, freeze or detach it, then train FM only on residual latent = GT latent - baseline latent.
+   Goal: make FM model high-frequency/detail residual instead of full latent from scratch.
+
+B. Multi-stage codec token modeling with a pretrained speech prior:
+   Use text-conditioned pretrained speech/code generator for lexical/acoustic prior, then adapt timing/prosody with video energy/AVSR features.
+   This is more likely than from-scratch residual codebook generation because prior residual codebooks were too hard.
+
+C. Perceptual/ASR/lip-sync objective addition:
+   Latent MSE/corr may not track decoded audio quality well. Add ASR text match or speaker/prosody perceptual losses for model selection.
+```
+
+## 2026-06-03 Predicted-energy residual recon result
+
+Motivation:
+
+```text
+Predicted-energy recon reached val_energy_corr ~0.70 but val_recon_corr only ~0.42.
+I tested a residual factorization: frozen baseline predicts the coarse latent, a new head predicts an additive residual.
+```
+
+Config:
+
+```text
+configs/fm_avsr_len120_220_12000_pred_energy_residual_recon.yaml
+```
+
+Implementation detail:
+
+```text
+residual_base_ckpt: runs/fm_avsr/len120_220_12000_pred_energy_recon_v1/step_001500.pt
+baseline is frozen
+baseline's predicted-energy head is used for energy condition
+new FMHead predicts residual latent
+final prediction = baseline_latent + residual_latent
+```
+
+A debug smoke initially found a bug: using the random residual head's energy predictor caused energy corr ~0.02. I fixed this by routing `energy_condition_mode=pred` through the frozen baseline when residual_base_ckpt is set. Debug then recovered energy corr ~0.689.
+
+Run behavior:
+
+```text
+Stopped early after step 1000 validation because validation recon did not improve.
+The process was stopped after step 1267; saved checkpoint is step_001000.pt.
+```
+
+Validation results:
+
+```text
+step  500: val_energy_corr 0.7065, val_recon_corr 0.4204, train_recon_corr 0.4905
+step 1000: val_energy_corr 0.7065, val_recon_corr 0.4209, train_recon_corr 0.4742
+```
+
+Artifacts:
+
+```text
+runs/fm_avsr/len120_220_12000_pred_energy_residual_recon_v1/metrics.csv
+runs/fm_avsr/len120_220_12000_pred_energy_residual_recon_v1/val_metrics.csv
+runs/fm_avsr/len120_220_12000_pred_energy_residual_recon_v1/pred_energy_residual_recon_curve.svg
+runs/fm_avsr/len120_220_12000_pred_energy_residual_recon_v1/step_001000.pt
+```
+
+Held-out audio eval:
+
+```bash
+uv run python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_pred_energy_residual_recon.yaml \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --ckpt runs/fm_avsr/len120_220_12000_pred_energy_residual_recon_v1/step_001000.pt \
+  --residual_base_ckpt runs/fm_avsr/len120_220_12000_pred_energy_recon_v1/step_001500.pt \
+  --use_recon \
+  --n 3 \
+  --save_gt \
+  --output_dir eval_out/pred_energy_residual_recon_step1000_true_heldout3
+```
+
+Output:
+
+```text
+eval_out/pred_energy_residual_recon_step1000_true_heldout3/0000_gt.wav
+eval_out/pred_energy_residual_recon_step1000_true_heldout3/0000_pred.wav
+eval_out/pred_energy_residual_recon_step1000_true_heldout3/0001_gt.wav
+eval_out/pred_energy_residual_recon_step1000_true_heldout3/0001_pred.wav
+eval_out/pred_energy_residual_recon_step1000_true_heldout3/0002_gt.wav
+eval_out/pred_energy_residual_recon_step1000_true_heldout3/0002_pred.wav
+```
+
+Waveform corr:
+
+```text
+0000_pred.wav wav_corr=-0.0032
+0001_pred.wav wav_corr=-0.0025
+0002_pred.wav wav_corr=-0.0081
+```
+
+Interpretation:
+
+```text
+Simple additive residual factorization did not improve held-out latent recon.
+It preserved the predicted-energy signal but stayed around val_recon_corr ~0.421, below the predicted-energy baseline best ~0.4225 and far below the GT-energy upper-bound ~0.518.
+This suggests the missing detail is not a small easy residual on top of the deterministic baseline under the same architecture.
+```
+
+Updated recommendation:
+
+```text
+The current AVSR/text -> Mimi latent regression family appears saturated around ~0.42 for true no-audio held-out data.
+GT-derived energy can raise an upper-bound recon to ~0.518, but predicted energy does not transfer that gain to full latent generation.
+The next meaningful direction should use a stronger pretrained audio/speech prior or change the target/objective, rather than continuing scalar conditioning or additive residuals.
+```
+
+## 2026-06-03 Metric interpretation and Moshiko prior gate
+
+The current metrics measure different things and should not be treated as equivalent evidence:
+
+```text
+energy corr ~0.70:
+  The condition can predict coarse speech timing and loudness envelope.
+  This is useful, but it does not prove that the model can generate clear speech.
+
+latent recon corr ~0.42-0.52:
+  The model predicts part of the continuous Mimi latent structure.
+  GT-energy can raise this upper-bound, but GT-energy is derived from the target audio and is not available for no-audio inference.
+
+waveform corr ~0:
+  Decoded waveform phase/detail still does not match GT.
+  This is expected for imperfect codec-latent prediction and is not by itself a complete perceptual-quality metric.
+```
+
+This means a high proxy metric cannot be interpreted as "any other video and text prior would also match the same target audio." The correct control is a condition-shuffle negative control:
+
+```text
+positive: condition_i -> gt_i
+negative: condition_j -> gt_i, where j != i
+```
+
+Expected result:
+
+```text
+If the condition is genuinely useful, shuffled condition should reduce energy/recon metrics.
+If shuffled condition stays close to the original score, the metric is mostly measuring length, dataset mean, or leakage rather than video/text grounding.
+```
+
+The latest direct Moshiko teacher-forced prior gate was rerun on the Moshiko-Mimi held-out cache:
+
+```bash
+uv run python scripts/eval_moshiko_prior.py \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --code_cache_root data/moshiko_mimi_code_cache_len120_220_heldout \
+  --n 20 \
+  --batch_size 1 \
+  --device cuda \
+  --dtype bf16 \
+  --output_json runs/diagnostics/moshiko_prior_heldout_n20.json
+```
+
+Result:
+
+```text
+ready: true
+n_clips: 20
+overall acc: 0.1122
+codebook0 acc: 0.2951
+codebook1 acc: 0.0935
+codebook2 acc: 0.0802
+codebook3 acc: 0.0808
+codebook4 acc: 0.0805
+codebook5 acc: 0.0935
+codebook6 acc: 0.0836
+codebook7 acc: 0.0895
+```
+
+Interpretation:
+
+```text
+The raw Moshiko dialogue-LM forward path is not a strong drop-in prior for this task.
+Its codebook0 accuracy is below the local AVSR AR codebook0 runs, and residual codebooks are near chance-like low accuracy.
+This does not rule out using Moshiko with a proper adapter or generation interface, but it rules out treating direct teacher-forced Moshiko logits as an immediate path to the >0.5 held-out audio target.
+```
+
+Next diagnostic before more long training:
+
+```text
+Add and run a condition-shuffle eval mode for FM/recon metrics.
+This will quantify how much of the current ~0.42 recon score is condition-grounded versus length/distribution prior.
+```
+
+## 2026-06-03 condition-shift negative control
+
+I added a narrow eval-only control to `scripts/eval_fm_avsr.py`:
+
+```text
+--condition_shift K
+--metrics_json PATH
+--metrics_only
+```
+
+Behavior:
+
+```text
+target/GT latent and GT wav remain clip_i
+video/text/speaker/optional energy condition comes from clip_{i+K}
+K=0 is the normal matched-condition eval
+K=1 is the negative control used here
+```
+
+Small listening-output sanity check:
+
+```bash
+uv run python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_pred_energy_recon.yaml \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --ckpt runs/fm_avsr/len120_220_12000_pred_energy_recon_v1/step_001500.pt \
+  --use_recon \
+  --n 3 \
+  --save_gt \
+  --condition_shift 1 \
+  --metrics_json eval_out/pred_energy_recon_step1500_heldout3_condition_shift1_check/metrics.json \
+  --output_dir eval_out/pred_energy_recon_step1500_heldout3_condition_shift1_check
+```
+
+The eval log showed the target and condition clips were actually different, for example:
+
+```text
+[  0] 00002  T_a=144  cond: 00001
+[  1] 00001  T_a=176  cond: 00012
+[  2] 00012  T_a=171  cond: 00002
+```
+
+Fast 100-clip latent metric control:
+
+```bash
+uv run python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_pred_energy_recon.yaml \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --ckpt runs/fm_avsr/len120_220_12000_pred_energy_recon_v1/step_001500.pt \
+  --use_recon \
+  --n 100 \
+  --metrics_only \
+  --metrics_json runs/diagnostics/pred_energy_recon_step1500_heldout100_condition_shift0_norm_metrics.json \
+  --output_dir eval_out/metrics_only_dummy
+
+uv run python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_pred_energy_recon.yaml \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --ckpt runs/fm_avsr/len120_220_12000_pred_energy_recon_v1/step_001500.pt \
+  --use_recon \
+  --n 100 \
+  --condition_shift 1 \
+  --metrics_only \
+  --metrics_json runs/diagnostics/pred_energy_recon_step1500_heldout100_condition_shift1_norm_metrics.json \
+  --output_dir eval_out/metrics_only_dummy
+```
+
+Note: the metric is computed in normalized latent space, matching the training validation metric. An earlier raw-target JSON was discarded because it compared normalized predictions to raw target latents.
+
+Results:
+
+```text
+matched condition, n=100:
+  mean_corr:   0.4087
+  median_corr: 0.4398
+  p10/p90:     0.2176 / 0.5392
+  mean_mse:    0.8349
+
+shifted condition, n=100:
+  mean_corr:   0.0270
+  median_corr: 0.0231
+  p10/p90:    -0.0051 / 0.0696
+  mean_mse:    1.2037
+```
+
+Interpretation:
+
+```text
+The current deterministic recon metric is strongly condition-grounded.
+When video/text/speaker are shifted to another clip, latent correlation collapses from ~0.41 to ~0.03.
+Therefore the current score is not just length, dataset mean, or a trivial prior.
+```
+
+But this also sharpens the bottleneck:
+
+```text
+The matched-condition score is real, but still below the >0.5 target.
+The current architecture can extract useful timing/content information from vision+text, but not enough spectral/detail structure for high-quality decoded audio.
+The next experiment should improve representation/target or use a stronger prior, not spend more time proving condition relevance.
+```
+
+## 2026-06-03 text-json word-timestamp recon experiment
+
+Motivation:
+
+```text
+The previous best true no-audio deterministic recon used noisy AVSR transcript hidden states:
+configs/fm_avsr_len120_220_12000_pred_energy_recon.yaml
+best val_recon_corr: ~0.4225
+
+The target product setting is video + text, so a cleaner text source is allowed.
+I tested whether text_json words plus word-level timestamps improve the current best pred-energy recon path.
+```
+
+Implementation/config changes:
+
+```text
+configs/fm_avsr_len120_220_12000_pred_energy_recon_textjson_wordts.yaml
+
+text_source: text_json
+text_alignment_mode: word_timestamps
+energy_condition_mode: pred
+loss_fm_weight: 0.0
+lambda_recon: 1.0
+lambda_energy: 0.1
+max_steps: 2500
+eval_every: 500
+save_every: 500
+```
+
+I also fixed eval config parsing so `scripts/eval_fm_avsr.py` honors `text_source` from YAML. Without this fix, a text-json-trained checkpoint could be evaluated with the wrong `smollm2_h.npy` source.
+
+Smoke checks:
+
+```text
+Sampled train/heldout clips have text.json, smollm2_h_text_json.npy, and smollm2_h.npy.
+Debug 1-step train run completed with text_json + word_timestamps.
+```
+
+Run:
+
+```bash
+uv run python scripts/train_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_pred_energy_recon_textjson_wordts.yaml
+```
+
+Training/validation curve:
+
+```text
+step  500: val_energy_corr 0.7051, val_recon_corr 0.4250, train_recon_corr 0.4277
+step 1000: val_energy_corr 0.7162, val_recon_corr 0.4522, train_recon_corr 0.4804
+step 1500: val_energy_corr 0.7202, val_recon_corr 0.4543, train_recon_corr 0.5307
+step 2000: val_energy_corr 0.7180, val_recon_corr 0.4539, train_recon_corr 0.5631
+step 2500: val_energy_corr 0.7225, val_recon_corr 0.4478, train_recon_corr 0.5958
+```
+
+Best checkpoint:
+
+```text
+runs/fm_avsr/len120_220_12000_pred_energy_recon_textjson_wordts_v2/step_001500.pt
+```
+
+Independent held-out 100-clip eval:
+
+```bash
+uv run python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_pred_energy_recon_textjson_wordts.yaml \
+  --clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --ckpt runs/fm_avsr/len120_220_12000_pred_energy_recon_textjson_wordts_v2/step_001500.pt \
+  --use_recon \
+  --n 100 \
+  --metrics_only \
+  --metrics_json runs/diagnostics/pred_energy_recon_textjson_wordts_step1500_heldout100_metrics.json \
+  --output_dir eval_out/metrics_only_dummy
+```
+
+Result:
+
+```text
+n: 100
+mean_corr:   0.4517
+median_corr: 0.4647
+p10/p90:     0.3445 / 0.5447
+mean_mse:    0.8067
+```
+
+Listening artifacts:
+
+```text
+eval_out/pred_energy_recon_textjson_wordts_step1500_heldout3/0000_gt.wav
+eval_out/pred_energy_recon_textjson_wordts_step1500_heldout3/0000_pred.wav
+eval_out/pred_energy_recon_textjson_wordts_step1500_heldout3/0001_gt.wav
+eval_out/pred_energy_recon_textjson_wordts_step1500_heldout3/0001_pred.wav
+eval_out/pred_energy_recon_textjson_wordts_step1500_heldout3/0002_gt.wav
+eval_out/pred_energy_recon_textjson_wordts_step1500_heldout3/0002_pred.wav
+```
+
+Interpretation:
+
+```text
+Clean text and word-timestamp alignment are a real improvement:
+  old pred-energy recon best: ~0.4225
+  new text_json wordts best: ~0.4543 train-val metric, ~0.4517 independent 100-clip metric
+
+The improvement is meaningful but still below the >0.5 target.
+The train/val gap widens after step 1500, so simply training this same configuration longer is unlikely to solve it.
+```
+
+Next high-leverage follow-up:
+
+```text
+Use the text_json word-timestamp setup as the new baseline.
+The next experiment should combine it with a stronger temporal conditioning path, most likely cross-attention or a larger recon head, but keep early stopping around 1500-2000 steps unless validation moves toward >0.5.
+```
+
+## 2026-06-03 what the corr metric does and does not mean
+
+The current recon/eval corr is a paired-condition metric:
+
+```text
+normal eval:
+  condition_i = video_i + text_i + speaker_i
+  target_i    = audio latent_i
+  score_i     = corr(model(condition_i), target_i)
+```
+
+This is the right form for testing no-audio video inference when the held-out sample still has GT audio for evaluation. At deployment time the model would only see `video_i + text_i`, but during validation we compare against `audio_i` because that is the only way to measure whether the generated audio matches the original clip.
+
+It should not be interpreted as:
+
+```text
+wrong interpretation:
+  condition_j = another video_j + another text_j
+  target_i    = audio latent_i
+  score       should stay high
+```
+
+That second setup is deliberately mismatched. If the condition is actually used, the score should collapse because another video's lips/timing/text do not describe the target audio.
+
+The condition-shift negative control confirmed this:
+
+```text
+old pred-energy recon, n=100:
+  matched condition_i -> target_i: mean_corr 0.4087
+  shifted condition_j -> target_i: mean_corr 0.0270
+```
+
+Interpretation:
+
+```text
+The current model is condition-grounded: mismatched video/text cannot reproduce the same target audio.
+The current best text_json word-timestamp model reaches mean_corr 0.4517 on 100 held-out paired clips.
+That number means "same-distribution held-out clips, each evaluated against its own GT audio".
+It does not mean arbitrary unrelated video/text can match another clip's GT audio.
+```
+
+The product requirement should therefore be evaluated on paired held-out or future no-audio clips with hidden GT:
+
+```text
+For each test sample k:
+  input:  video_k + text_k
+  output: generated audio_k
+  metric: compare generated audio_k to GT audio_k if GT exists
+```
+
+## 2026-06-03 text-json word-timestamp cross-attention follow-up
+
+Motivation:
+
+```text
+The text_json word-timestamp baseline improved true no-audio recon to ~0.454.
+I tested whether adding frame-level cross-attention on the same setup improves the temporal condition path.
+```
+
+Config/run:
+
+```text
+configs/fm_avsr_len120_220_12000_pred_energy_recon_textjson_wordts_crossattn.yaml
+runs/fm_avsr/len120_220_12000_pred_energy_recon_textjson_wordts_crossattn_v1
+```
+
+Bug found and fixed before the formal run:
+
+```text
+When use_cross_attn=True and use_text_token_cross_attn=False, the cross-attention tokens are frame-level condition tokens with shape (B, T_a, D).
+The code was still passing the raw text-token mask with shape (B, L_text), causing a mask/token length mismatch.
+```
+
+Fix:
+
+```text
+src/streaminlip/v2/fm_head.py
+  _build_cond_parts now only forwards text_token_mask when raw text-token cross-attention is active.
+  For frame-level cross-attention, cond_token_mask is left as None and _forward_dit creates the correct (B, T_a) mask.
+
+tests/test_fm_head_temporal_condition.py
+  test_frame_cross_attention_ignores_raw_text_token_mask_shape
+```
+
+Validation curve:
+
+```text
+step  500: val_energy_corr 0.7037, val_recon_corr 0.4253, train_recon_corr 0.4256
+step 1000: val_energy_corr 0.7145, val_recon_corr 0.4519, train_recon_corr 0.4850
+step 1500: val_energy_corr 0.7197, val_recon_corr 0.4528, train_recon_corr 0.5318
+step 2000: val_energy_corr 0.7199, val_recon_corr 0.4551, train_recon_corr 0.5476
+```
+
+Comparison:
+
+```text
+text_json wordts baseline best:
+  val_recon_corr 0.4543 at step 1500
+  independent heldout100 mean_corr 0.4517
+
+text_json wordts + frame cross-attn:
+  val_recon_corr 0.4551 at step 2000
+```
+
+Interpretation:
+
+```text
+Frame-level cross-attention is technically working, but the gain is tiny and not enough to be a meaningful breakthrough.
+It does not change the current conclusion: text quality/alignment helped, but the architecture is still below the >0.5 paired held-out corr target.
+Further work should target the audio representation/objective or a stronger pretrained speech/audio prior, not simply add another condition injection point to the same deterministic recon head.
+```
+
+## 2026-06-03 prepared corr-aligned recon-loss experiment
+
+Reason:
+
+```text
+The main training objective for deterministic recon has been masked MSE, while the gate metric is latent corr.
+In the text_json word-timestamp baseline, train MSE keeps improving after step 1500 but held-out corr plateaus around 0.454.
+This suggests a small single-variable test: keep MSE for scale/detail stability, and add a direct 1-corr auxiliary loss.
+```
+
+Code/config prepared:
+
+```text
+scripts/train_fm_avsr.py
+  --lambda_recon_corr
+  masked_corr_loss(pred, target, lengths) = 1 - PearsonCorr(valid latent values)
+  loss_total += lambda_recon_corr * loss_recon_corr
+
+configs/fm_avsr_len120_220_12000_pred_energy_recon_textjson_wordts_corrloss.yaml
+  baseline: text_json word_timestamps pred-energy recon
+  lambda_recon: 1.0
+  lambda_recon_corr: 0.2
+  lambda_energy: 0.1
+  max_steps: 2500
+```
+
+Smoke verification:
+
+```text
+1-step debug run completed.
+metrics.csv and checkpoint both include loss_recon_corr.
+```
+
+First formal attempt:
+
+```text
+runs/fm_avsr/len120_220_12000_pred_energy_recon_textjson_wordts_corrloss_v1
+
+This run was stopped early because step 2+ became NaN.
+Root cause: the first masked_corr_loss implementation used sqrt(var).clamp_min(...) style denominator handling.
+When the initial prediction was near-constant, the forward loss was finite but backward gradients through sqrt(0) were non-finite.
+```
+
+Fix:
+
+```text
+masked_corr_loss now computes:
+  pred_std   = sqrt(var(pred) + eps)
+  target_std = sqrt(var(target) + eps)
+
+A regression test was added:
+  test_masked_corr_loss_has_finite_grad_for_constant_prediction
+```
+
+Stable formal run:
+
+```text
+runs/fm_avsr/len120_220_12000_pred_energy_recon_textjson_wordts_corrloss_v2
+```
+
+Validation curve:
+
+```text
+step  500: val_energy_corr 0.7054, val_recon_corr 0.4243, train_recon_corr 0.4358
+step 1000: val_energy_corr 0.7152, val_recon_corr 0.4525, train_recon_corr 0.4877
+step 1500: val_energy_corr 0.7204, val_recon_corr 0.4549, train_recon_corr 0.5386
+step 2000: val_energy_corr 0.7190, val_recon_corr 0.4523, train_recon_corr 0.5534
+```
+
+Comparison:
+
+```text
+text_json wordts baseline:
+  step 1500 val_recon_corr 0.4543
+  step 2000 val_recon_corr 0.4539
+
+corr-loss v2:
+  step 1500 val_recon_corr 0.4549
+  step 2000 val_recon_corr 0.4523
+```
+
+Interpretation:
+
+```text
+The corr-aligned auxiliary loss is now numerically stable, but it does not provide a meaningful improvement.
+The best observed gain is only +0.0006 at step 1500 and it regresses by step 2000.
+This does not justify heldout audio eval or further tuning of this exact MSE+corr deterministic recon objective.
+```
+
+Formal run command:
+
+```bash
+uv run python scripts/train_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_pred_energy_recon_textjson_wordts_corrloss.yaml
+```
+
+Early-stop rule:
+
+```text
+Compare against text_json wordts baseline:
+  best val_recon_corr 0.4543 at step 1500
+If corr-loss run does not exceed ~0.46 by step 1500-2000, stop it and avoid spending more time on the same deterministic recon objective.
+```
+
+Outcome:
+
+```text
+Stopped at step 2000 under the early-stop rule.
+No independent heldout/audio eval was run because the validation curve did not show a real improvement over baseline.
+```
+
+## 2026-06-03 latent PCA oracle and condition probe
+
+Reason:
+
+```text
+Current deterministic neural recon is stuck around val_recon_corr ~= 0.455.
+Before adding more architecture, I checked whether a low-rank latent target can theoretically exceed 0.5, and whether simple conditions can predict that low-rank target.
+```
+
+Script:
+
+```text
+scripts/eval_latent_pca_condition_probe.py
+```
+
+Run:
+
+```bash
+uv run python scripts/eval_latent_pca_condition_probe.py \
+  --train_clip_list configs/eval_splits/pretrain_len120_220_train12000_seed43.txt \
+  --val_clip_list configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt \
+  --train_n 2000 \
+  --val_n 300 \
+  --dims 16,32,64,128,256 \
+  --l2 1000 \
+  --output_dir runs/diagnostics/latent_pca_condition_probe_2k300_textjson_avsrtextspk
+```
+
+Artifacts:
+
+```text
+runs/diagnostics/latent_pca_condition_probe_2k300_textjson_avsrtextspk/summary.json
+runs/diagnostics/latent_pca_condition_probe_2k300_textjson_avsrtextspk/pca_basis.npz
+```
+
+Important results on 300 held-out clips:
+
+```text
+PCA oracle, compare low-rank GT reconstruction to original GT latent:
+  dim 16:  mean_corr 0.5820
+  dim 32:  mean_corr 0.6960
+  dim 64:  mean_corr 0.8152
+  dim 128: mean_corr 0.9266
+  dim 256: mean_corr 0.9954
+
+Linear ridge condition -> PCA coefficients, compare predicted low-rank latent to original GT latent:
+  dim 16:  mean_corr 0.2736
+  dim 32:  mean_corr 0.2925
+  dim 64:  mean_corr 0.3068
+  dim 128: mean_corr 0.3137
+  dim 256: mean_corr 0.3184
+```
+
+Interpretation:
+
+```text
+The low-rank target itself is not the bottleneck: even PCA-16 GT reconstruction is above 0.5.
+But a linear map from avsr + text_json + speaker to PCA coefficients is far below both the neural recon model and the target threshold.
+This suggests the useful next test is a nonlinear model trained against a low-rank PCA target, not more scalar auxiliary losses on the full 512-D target.
+```
+
+Prepared next experiment:
+
+```text
+scripts/train_fm_avsr.py
+  --recon_target_pca_npz
+  --recon_target_pca_dim
+
+configs/fm_avsr_len120_220_12000_pred_energy_recon_textjson_wordts_pca16.yaml
+```
+
+Behavior:
+
+```text
+Training recon loss target is GT latent projected to the PCA-16 subspace.
+Validation metrics are still computed against the original full GT latent, so the score remains directly comparable to previous val_recon_corr.
+```
+
+Smoke verification:
+
+```text
+PCA-16 1-step debug train completed.
+tests/test_fm_avsr_dataset.py passes with 31 tests.
+```
+
+Formal run command:
+
+```bash
+uv run python scripts/train_fm_avsr.py \
+  --config configs/fm_avsr_len120_220_12000_pred_energy_recon_textjson_wordts_pca16.yaml
+```
+
+Early-stop rule:
+
+```text
+PCA-16 oracle val mean_corr is ~0.582, so this experiment should move clearly above the 0.455 plateau if the nonlinear condition mapper helps.
+If val_recon_corr is still below ~0.48 by step 1500-2000, stop and move to a stronger pretrained speech/audio prior or a sequence model over discrete audio codes.
+```
+
+PCA-16 run:
+
+```text
+runs/fm_avsr/len120_220_12000_pred_energy_recon_textjson_wordts_pca16_v1
+```
+
+Validation curve:
+
+```text
+step  500: val_energy_corr 0.7063, val_recon_corr 0.3340, train_recon_corr 0.2994
+step 1000: val_energy_corr 0.7157, val_recon_corr 0.3500, train_recon_corr 0.3787
+```
+
+Outcome:
+
+```text
+Stopped immediately after step 1000.
+This is far below the full-latent text_json baseline (~0.452 at step 1000 and ~0.454 at step 1500).
+No heldout/audio eval was run.
+```
+
+Interpretation:
+
+```text
+The PCA oracle is high because it uses GT PCA coefficients.
+Training the model to output only the PCA-16 low-rank target makes the output too low-rank and loses much of the full-latent global correlation.
+Therefore PCA should not replace the full latent target as the sole reconstruction target.
+
+If PCA is used again, it should be an auxiliary head/loss for acoustic factors while the main output remains full 512-D latent, or as a separate conditioning bottleneck feeding a stronger decoder/prior.
+```
+
+## 2026-06-03 PCA auxiliary loss experiment
+
+Reason:
+
+```text
+PCA-16 as the only reconstruction target failed because it made output too low-rank.
+The next minimal test was to keep the full 512-D latent MSE as the main target and add PCA-16 MSE as a small auxiliary loss.
+```
+
+Implementation/config:
+
+```text
+scripts/train_fm_avsr.py
+  --lambda_recon_pca
+  --recon_target_pca_mode aux
+
+configs/fm_avsr_len120_220_12000_pred_energy_recon_textjson_wordts_pcaaux16.yaml
+  lambda_recon: 1.0
+  lambda_recon_pca: 0.25
+  lambda_energy: 0.1
+```
+
+Run:
+
+```text
+runs/fm_avsr/len120_220_12000_pred_energy_recon_textjson_wordts_pcaaux16_v1
+```
+
+Validation curve:
+
+```text
+step  500: val_energy_corr 0.7027, val_recon_corr 0.4193
+step 1000: val_energy_corr 0.7143, val_recon_corr 0.4462
+```
+
+Comparison:
+
+```text
+text_json wordts baseline:
+  step  500: val_recon_corr 0.4250
+  step 1000: val_recon_corr 0.4522
+```
+
+Outcome:
+
+```text
+Stopped after step 1000.
+PCA auxiliary loss underperforms the baseline and does not justify running to 1500/2000 or doing heldout audio eval.
+```
+
+Interpretation:
+
+```text
+PCA low-rank structure is informative as an oracle diagnostic, but forcing the deterministic recon model toward PCA-16, even as an auxiliary MSE, does not improve the paired full-latent corr metric.
+Further progress is unlikely to come from small loss reweighting around the same deterministic recon architecture.
+The next high-leverage path should be a stronger pretrained speech/audio prior or a sequence/discrete-code model that can model acoustic detail rather than only framewise regression.
 ```
