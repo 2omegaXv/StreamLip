@@ -317,6 +317,7 @@ Combined 59,144 split:
 | 59k residual + per-sample corr loss | 1500 | 0.58177344 | 0.66763517 | 0.60181215 | `lambda_sample_corr=0.2`; effectively tied with CTC/denoise |
 | 12k residual + Mimi/Mel timbre cond | 1500 | n/a | n/a | n/a | quick signal only; small val corr `0.58422178`, below platform |
 | 59k residual + audio prompt stat pool | 1500 | n/a | n/a | n/a | quick signal only; small val corr `0.58425596`, below platform |
+| 59k residual + sample endpoint loss | 1500 | n/a | n/a | n/a | quick signal only; small val recon corr `0.58396477`, sample corr `0.34727610` |
 
 The 50k scale-up improved the best full eval from `0.57255184` to
 `0.58091919`. Residual timbre-stat continuation added only `+0.00013806`
@@ -553,6 +554,73 @@ The condition entry is practical and safe to keep as an experiment switch, but
 this simple prompt mean/std fusion did not unlock additional timbre detail in
 the deterministic residual head.
 
+### Sample Endpoint Continuation
+
+Run:
+`runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_residual_samplerecon02_from1000_recon_textjson_wordts_v1`
+
+Config:
+`configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_residual_samplerecon02_from1000_recon_textjson_wordts.yaml`
+
+This continuation keeps the deterministic residual objective but adds a
+gradient-through-sampling endpoint loss:
+
+```text
+loss = recon_mse + 0.2 * mse(residual_base + fm.sample(nfe=4), target_latent)
+```
+
+The purpose is different from the earlier static condition tests. It checks
+whether optimizing the actual Euler-sampled endpoint can reduce the
+regression-to-average behavior that may be contributing to mixed or generic
+voice quality.
+
+Training:
+
+- resume: 59k residual step1000
+- residual base: 59k pooled prompt step5000
+- `lambda_recon: 1.0`
+- `lambda_sample_recon: 0.2`
+- `sample_recon_nfe: 4`
+- `eval_sample_nfe: 4`
+- `lr: 5e-5`
+- max extra steps: 500
+- elapsed: about 6.0 minutes to step1500
+
+Small validation results:
+
+| Step | Val recon corr | Val sample corr | Val sample MSE | Val sample MAE |
+| ---: | ---: | ---: | ---: | ---: |
+| 1250 | 0.58397699 | 0.32753573 | 1.43063530 | 0.93914227 |
+| 1500 | 0.58396477 | 0.34727610 | 1.30443106 | 0.89362325 |
+
+The sample endpoint objective clearly trains the sampling path, but the sampled
+latent is still far below deterministic reconstruction quality. It also pulls
+the recon probe below the existing `0.58427` small-val platform. I did not run
+a full val1000 recon eval because this variant is not competitive on the
+current corr target.
+
+A small listening set was decoded:
+
+- fixed sample path:
+  `eval_out/listen_samplerecon02_step1500_sample_fixbase_n4`
+- same checkpoint deterministic recon:
+  `eval_out/listen_samplerecon02_step1500_recon_n4`
+- current deterministic reference:
+  `eval_out/listen_samplecorr02_step1500_recon_n4`
+
+On the first four val clips, the fixed sample path has mean corr `0.36166399`,
+while deterministic recon is about `0.6278` on the same clips. The listening
+set is useful for subjective checks, but the sample endpoint is not yet strong
+enough to replace deterministic recon.
+
+While generating those samples, an eval bug was found and fixed:
+`eval_fm_avsr.py` composed residual checkpoints with the frozen baseline in
+`--use_recon`, but default sample mode and denoise mode used the raw residual
+output. This produced near-zero sample metrics and invalid sample wavs for
+residual checkpoints. Eval now computes the residual base latent for all three
+decode paths, and the regression test
+`test_residual_base_latent_is_computed_for_sample_eval_path` covers the helper.
+
 ### Prompt Calibration Diagnostics
 
 A one-off full-val diagnostic tested whether the first 38 prompt frames could be
@@ -619,6 +687,9 @@ aggregation is also effectively tied, improving full-val corr by only
 to the timbre condition also failed its quick signal check, landing below the
 existing small-val platform. Adding prompt-token mean/std as a zero-initialized
 in-model global condition was also only a platform tie on small validation.
+Adding a weak sample endpoint loss makes the sampling path trainable on the
+current residual platform, but sampled output remains much worse than
+deterministic recon and the recon probe drops slightly.
 Adding the remaining 9,144 ready lip-AVSR clips is the strongest positive move
 in the latest batch, but it only raises full eval to `0.58167589`, and the best
 short continuations only raise it to about `0.58177`. The remaining gap to 0.6
@@ -650,5 +721,7 @@ Code support for `timbre_cond` and `audio_prompt` was covered by unit tests:
 - `uv run python -m py_compile scripts/train_fm_avsr.py scripts/eval_fm_avsr.py scripts/extract_timbre_cond.py`
 - `uv run python -m unittest tests.test_timbre_condition tests.test_eval_fm_avsr tests.test_fm_avsr_dataset -v`
 - `uv run python -m py_compile scripts/train_fm_avsr.py scripts/eval_fm_avsr.py src/streaminlip/v2/fm_head.py`
+- `uv run python -m unittest tests.test_eval_fm_avsr -v`
+- `uv run python -m py_compile scripts/eval_fm_avsr.py`
 
 All individual training/eval runs in this note were kept under the 1-hour limit.

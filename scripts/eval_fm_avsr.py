@@ -348,6 +348,36 @@ def latent_metrics(pred: np.ndarray, target: np.ndarray, start_frame: int = 0) -
     }
 
 
+def ensure_residual_base_latent(
+    base_latent,
+    residual_base,
+    v_down,
+    h_down,
+    spk_t,
+    *,
+    text_tokens=None,
+    text_token_mask=None,
+    timbre_t=None,
+    audio_prompt=None,
+    extra_cond=None,
+    base_extra_dim=0,
+    ctc_ids=None,
+    ctc_probs=None,
+):
+    if residual_base is None or base_latent is not None:
+        return base_latent
+    return residual_base.reconstruct_from_cond(
+        v_down, h_down, spk_t,
+        text_tokens=text_tokens,
+        text_token_mask=text_token_mask,
+        timbre_cond=timbre_t,
+        audio_prompt=audio_prompt,
+        extra_cond=None if extra_cond is None else extra_cond[..., :base_extra_dim],
+        ctc_topk_ids=ctc_ids,
+        ctc_topk_probs=ctc_probs,
+    )
+
+
 def main():
     args   = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -599,17 +629,21 @@ def main():
                     ctc_topk_probs=ctc_probs,
                 )
                 base_latent = base_latent_for_condition
-                if residual_base is not None and base_latent is None:
-                    base_latent = residual_base.reconstruct_from_cond(
-                        v_down, h_down, spk_t,
-                        text_tokens=text_tokens,
-                        text_token_mask=text_token_mask,
-                        timbre_cond=timbre_t,
-                        audio_prompt=audio_prompt,
-                        extra_cond=None if extra_cond is None else extra_cond[..., :base_extra_dim],
-                        ctc_topk_ids=ctc_ids,
-                        ctc_topk_probs=ctc_probs,
-                    )
+                base_latent = ensure_residual_base_latent(
+                    base_latent,
+                    residual_base,
+                    v_down,
+                    h_down,
+                    spk_t,
+                    text_tokens=text_tokens,
+                    text_token_mask=text_token_mask,
+                    timbre_t=timbre_t,
+                    audio_prompt=audio_prompt,
+                    extra_cond=extra_cond,
+                    base_extra_dim=base_extra_dim,
+                    ctc_ids=ctc_ids,
+                    ctc_probs=ctc_probs,
+                )
                 pred_latent = compose_endpoint_prediction(pred_latent_raw, base_latent)
             elif args.use_denoise:
                 gen = torch.Generator(device=device).manual_seed(args.denoise_seed + i)
@@ -629,8 +663,23 @@ def main():
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
                 )
+                base_latent = ensure_residual_base_latent(
+                    base_latent_for_condition,
+                    residual_base,
+                    v_down,
+                    h_down,
+                    spk_t,
+                    text_tokens=text_tokens,
+                    text_token_mask=text_token_mask,
+                    timbre_t=timbre_t,
+                    audio_prompt=audio_prompt,
+                    extra_cond=extra_cond,
+                    base_extra_dim=base_extra_dim,
+                    ctc_ids=ctc_ids,
+                    ctc_probs=ctc_probs,
+                )
                 pred_latent = compose_endpoint_prediction(
-                    pred_latent_raw, base_latent_for_condition
+                    pred_latent_raw, base_latent
                 )
             else:
                 pred_latent_raw = fm.forward_inference(
@@ -643,8 +692,23 @@ def main():
                     ctc_topk_ids=ctc_ids,
                     ctc_topk_probs=ctc_probs,
                 )
+                base_latent = ensure_residual_base_latent(
+                    base_latent_for_condition,
+                    residual_base,
+                    v_down,
+                    h_down,
+                    spk_t,
+                    text_tokens=text_tokens,
+                    text_token_mask=text_token_mask,
+                    timbre_t=timbre_t,
+                    audio_prompt=audio_prompt,
+                    extra_cond=extra_cond,
+                    base_extra_dim=base_extra_dim,
+                    ctc_ids=ctc_ids,
+                    ctc_probs=ctc_probs,
+                )
                 pred_latent = compose_endpoint_prediction(
-                    pred_latent_raw, base_latent_for_condition
+                    pred_latent_raw, base_latent
                 )
             pred_norm_np = pred_latent.squeeze(0).float().cpu().numpy()
             target_norm_np = normalize_latent(lat_gt[:T_a])

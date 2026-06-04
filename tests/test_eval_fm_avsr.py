@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import numpy as np
+import torch
 
 from scripts.eval_fm_avsr import latent_metrics, shifted_condition_clip
 from scripts import eval_fm_avsr
@@ -176,6 +177,31 @@ class EvalFMAVSRTest(unittest.TestCase):
         set_norm_stats_path(Path("data/processed/latent_norm_stats.npz"))
         self.assertAlmostEqual(metrics["corr"], 1.0, places=6)
         self.assertAlmostEqual(metrics["mse"], 0.0)
+
+    def test_residual_base_latent_is_computed_for_sample_eval_path(self):
+        class FakeResidualBase:
+            def __init__(self):
+                self.calls = 0
+
+            def reconstruct_from_cond(self, v_down, h_down, spk_t, **kwargs):
+                self.calls += 1
+                return torch.ones(v_down.shape[0], v_down.shape[1], 512)
+
+        residual_base = FakeResidualBase()
+        v_down = torch.zeros(1, 3, 768)
+        h_down = torch.zeros(1, 3, 960)
+        spk_t = torch.zeros(1, 256)
+
+        base = eval_fm_avsr.ensure_residual_base_latent(
+            None,
+            residual_base,
+            v_down,
+            h_down,
+            spk_t,
+        )
+
+        self.assertEqual(residual_base.calls, 1)
+        torch.testing.assert_close(base, torch.ones(1, 3, 512))
 
 
 if __name__ == "__main__":
