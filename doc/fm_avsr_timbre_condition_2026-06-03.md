@@ -763,6 +763,11 @@ Post-prompt listen samples were exported to
 `--wav_start_frame 38`, so the first 3 seconds used for voice control are not
 included in the generated or GT wavs.
 
+A stronger `lambda_prompt_timbre_stats: 0.10` was also checked with the same
+setup and early-stopped at step1250. Its small-val recon corr was `0.58416606`,
+below both the `0.05` run at step1250 (`0.58428280`) and the baseline at
+step1250 (`0.58424845`), so no full-val eval was run.
+
 ## Interpretation
 
 Manual timbre control is practical in this codebase. The mean/std prompt is a
