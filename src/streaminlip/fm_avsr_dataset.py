@@ -114,6 +114,8 @@ def _norm_word(word: str) -> str:
 
 def read_clip_text(clip: str | Path, text_source: str = "avsr") -> str:
     clip = Path(clip)
+    if text_source == "lipavsr":
+        return re.sub(r"\s+", " ", (clip / "avsr_text_lipavsr.txt").read_text()).strip()
     if text_source == "text_json":
         meta_path = clip / "text.json"
         if meta_path.exists():
@@ -132,7 +134,14 @@ def read_clip_text(clip: str | Path, text_source: str = "avsr") -> str:
 
 
 def smollm2_hidden_path(clip: str | Path, text_source: str = "avsr") -> Path:
-    name = "smollm2_h_text_json.npy" if text_source == "text_json" else "smollm2_h.npy"
+    name_by_source = {
+        "avsr": "smollm2_h.npy",
+        "text_json": "smollm2_h_text_json.npy",
+        "lipavsr": "smollm2_h_lipavsr.npy",
+    }
+    name = name_by_source.get(text_source)
+    if name is None:
+        raise ValueError(f"unknown text_source={text_source!r}")
     return Path(clip) / name
 
 

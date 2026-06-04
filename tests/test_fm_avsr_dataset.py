@@ -15,6 +15,7 @@ from streaminlip.fm_avsr_dataset import (
     collate_fn,
     compute_log_rms_energy,
     read_clip_text,
+    smollm2_hidden_path,
     validate_latent_frame_rate,
 )
 from scripts.train_fm_avsr import (
@@ -108,6 +109,34 @@ class FMAVSRDatasetTest(unittest.TestCase):
 
             self.assertEqual(read_clip_text(clip, "text_json"), "GOOD TEXT")
             self.assertEqual(read_clip_text(clip, "avsr"), "BAD ASR")
+
+    def test_lipavsr_text_source_uses_lipavsr_text_and_hidden_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            clip = root / "pretrain" / "spk" / "00001"
+            clip.mkdir(parents=True)
+            (clip / "avsr_text.txt").write_text("OLD ASR\n")
+            (clip / "avsr_text_lipavsr.txt").write_text("NEW LIP AVSR\n")
+            np.save(clip / "avsr_enc.npy", np.ones((4, 768), dtype=np.float32))
+            np.savez(clip / "latent.npz", latent=np.ones((2, 512), dtype=np.float32))
+            np.save(clip / "speaker_emb.npy", np.ones((256,), dtype=np.float32))
+            np.save(clip / "smollm2_h.npy", np.ones((1, 960), dtype=np.float16))
+            np.save(clip / "smollm2_h_lipavsr.npy", np.full((2, 960), 3, dtype=np.float16))
+            clip_list = root / "clips.txt"
+            clip_list.write_text("pretrain/spk/00001\n")
+
+            ds = FMAVSRDataset(
+                str(root),
+                clip_list=str(clip_list),
+                text_source="lipavsr",
+            )
+            item = ds[0]
+
+            self.assertEqual(read_clip_text(clip, "lipavsr"), "NEW LIP AVSR")
+            self.assertEqual(smollm2_hidden_path(clip, "lipavsr").name, "smollm2_h_lipavsr.npy")
+            self.assertEqual(item["text"], "NEW LIP AVSR")
+            self.assertEqual(item["h_lm"].shape[0], 2)
+            self.assertAlmostEqual(float(item["h_lm"][0, 0]), 3.0)
 
     def test_dataset_text_json_source_uses_matching_hidden_file(self):
         with tempfile.TemporaryDirectory() as tmp:

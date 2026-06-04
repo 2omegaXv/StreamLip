@@ -154,7 +154,7 @@ def parse_args():
                    default="uniform",
                    help="How to align SmolLM2 hidden states to latent frames.")
     p.add_argument("--text_source",
-                   choices=["avsr", "text_json"],
+                   choices=["avsr", "text_json", "lipavsr"],
                    default="avsr",
                    help="Text/SmolLM2 hidden-state source.")
     p.add_argument("--visual_feature_name", default="avsr_enc.npy",
