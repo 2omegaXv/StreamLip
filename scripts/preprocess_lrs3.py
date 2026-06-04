@@ -20,7 +20,10 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torchaudio
+try:
+    import torchaudio
+except OSError:
+    torchaudio = None  # fallback: use scipy in extract_latent
 from tqdm import tqdm
 from transformers import MimiModel
 
@@ -45,25 +48,30 @@ def build_mimi(device):
 
 @torch.no_grad()
 def extract_latent(mimi, wav_path, device):
-    wav, sr = torchaudio.load(str(wav_path))
+    from scipy.io import wavfile
+    import scipy.signal
+    sr, wav_np = wavfile.read(str(wav_path))
+    wav_f = wav_np.astype(np.float32) / 32768.0
+    if wav_f.ndim > 1:
+        wav_f = wav_f.mean(axis=1)
     if sr != MIMI_SR:
-        wav = torchaudio.functional.resample(wav, sr, MIMI_SR)
-    if wav.shape[0] > 1:
-        wav = wav.mean(0, keepdim=True)
-    wav = wav.unsqueeze(0).to(device)              # (1, 1, T)
-    x = mimi.encoder(wav)                          # (1, 512, T')
-    x = mimi.encoder_transformer(x.transpose(1,2)).last_hidden_state  # (1, T', 512)
-    x = mimi.downsample(x.transpose(1,2))          # (1, 512, T_a)
-    return x.transpose(1,2).squeeze(0).cpu().half().numpy()  # (T_a, 512)
+        n_out = int(len(wav_f) * MIMI_SR / sr)
+        wav_f = scipy.signal.resample(wav_f, n_out)
+    wav = torch.from_numpy(wav_f).unsqueeze(0).unsqueeze(0).to(device)  # (1,1,T)
+    codes = mimi.encode(wav).audio_codes                             # (1, 32, T_a) int64
+    x_q   = mimi.quantizer.decode(codes)                             # (1, 512, T_a) quantized
+    lat   = x_q.transpose(1,2).squeeze(0).float().cpu()             # (T_a, 512) float32
+    lat   = lat.clamp(-65504, 65504)                                  # safe float16 range
+    return lat.half().numpy()                                         # (T_a, 512) float16
 
 
-def extract_latents_gpu(clip_dirs, device):
+def extract_latents_gpu(clip_dirs, device, force=False):
     mimi = build_mimi(device)
     errors = []
     for d in tqdm(clip_dirs, desc="Mimi latent"):
         latent_path = d / "latent.npz"
         audio_path  = d / "audio.wav"
-        if latent_path.exists():
+        if latent_path.exists() and not force:
             continue
         if not audio_path.exists():
             errors.append(f"missing audio: {d}")
@@ -188,7 +196,9 @@ def main():
                         help="face_alignment 设备，默认与 --gpu 一致，如 cuda:1 或 cpu")
     parser.add_argument("--lrs3_root", default=str(LRS3_ROOT))
     parser.add_argument("--out_root",  default=str(OUT_ROOT))
-    parser.add_argument("--limit",    type=int, default=None)
+    parser.add_argument("--limit",        type=int, default=None)
+    parser.add_argument("--force_latent", action="store_true",
+                        help="Re-extract latent.npz even if it already exists (use after VQ fix)")
     args = parser.parse_args()
 
     lrs3_root = Path(args.lrs3_root)
@@ -247,7 +257,7 @@ def main():
 
     # 4. Mimi latent
     print(f"\n提取 Mimi latent（{device}）...")
-    latent_errors = extract_latents_gpu(clip_dirs, device)
+    latent_errors = extract_latents_gpu(clip_dirs, device, force=args.force_latent)
     if latent_errors:
         print(f"latent 错误 {len(latent_errors)} 个:")
         for e in latent_errors[:10]:
