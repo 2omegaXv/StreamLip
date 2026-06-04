@@ -295,6 +295,7 @@ class FMAVSRDataset(Dataset):
             "self_prefix",
             "same_parent_next",
             "self_random_window",
+            "self_late_window",
         }:
             raise ValueError(f"unknown audio_prompt_ref_mode: {self.audio_prompt_ref_mode}")
         self._same_parent_next = self._build_same_parent_next_refs(clips)
@@ -323,11 +324,12 @@ class FMAVSRDataset(Dataset):
         return clip
 
     def _audio_prompt_start(self, prompt_lat: np.ndarray) -> int:
-        if self.audio_prompt_ref_mode != "self_random_window":
+        if self.audio_prompt_ref_mode not in {"self_random_window", "self_late_window"}:
             return 0
         if prompt_lat.shape[0] <= self.audio_prompt_frames:
             return 0
-        return min(38, prompt_lat.shape[0] - self.audio_prompt_frames)
+        preferred_start = 76 if self.audio_prompt_ref_mode == "self_late_window" else 38
+        return min(preferred_start, prompt_lat.shape[0] - self.audio_prompt_frames)
 
     def __getitem__(self, idx):
         c = self.clips[idx]

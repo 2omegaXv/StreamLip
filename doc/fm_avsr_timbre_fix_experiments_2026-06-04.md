@@ -467,3 +467,47 @@ E2 can partially adapt to a non-prefix same-video reference, but preserving the
 historical-best corr likely requires training this data regime from earlier in
 the schedule or replacing the temporal prompt with a dedicated speaker-only
 encoder.
+
+### E9: Same-Clip Late Prompt Window
+
+Hypothesis:
+
+E7 used frame 38 as the non-prefix prompt start. That avoids the original first
+3.04 s prompt, but it overlaps the beginning of the post-prompt metric/export
+region. To test whether E7 still benefits from copying content at the evaluated
+start, use `audio_prompt_ref_mode=self_late_window`, which starts at frame 76
+when the clip is long enough.
+
+Code/config:
+
+- `FMAVSRDataset(audio_prompt_ref_mode="self_late_window")`
+  - uses the same clip as reference;
+  - starts the prompt window at frame 76 when possible;
+  - falls back to the latest valid window for shorter clips.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.57805809` | `0.65669878` | `0.59545891` | `0.57842845` | `187.46 s` | stop |
+
+Conclusion:
+
+Late-window prompting is below E7/E8 and remains well below E2. This supports
+the caveat that E7's stronger score may still include some post-crop content
+copying because its prompt starts exactly where the metric/export starts. The
+cleaner same-clip reference direction is still useful diagnostically, but the
+current temporal prompt representation has not been fixed without sacrificing
+validation corr.
