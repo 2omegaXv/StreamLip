@@ -720,6 +720,44 @@ The learned pool is an effective tie, finishing `0.00000331` below the baseline
 at step1500 on the small validation probe. Because it did not clear the existing
 small-val platform, no full-val1000 eval was run for this branch.
 
+### Prompt-Consistency Timbre Stats
+
+Added an optional prompt-consistency timbre loss controlled by
+`lambda_prompt_timbre_stats`. Unlike `lambda_timbre_stats`, which matches the
+prediction to the target post-prompt latent stats, this loss matches predicted
+post-prompt mean/std to the first 38 normalized Mimi prompt frames:
+
+```text
+loss_prompt_timbre_stats =
+  mse(mean(pred[38:]), mean(prompt[:38]))
+  + mse(std(pred[38:]), std(prompt[:38]))
+```
+
+Config:
+`configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_from1000_recon_textjson_wordts.yaml`.
+
+Training matched the current best 59k residual/sample-corr continuation except
+for `lambda_prompt_timbre_stats: 0.05`. It resumed from the 50k residual
+step1000 checkpoint, used the same residual base, and ran to step1500.
+
+| Run | Step | Small-val recon corr |
+| --- | ---: | ---: |
+| 59k residual sample-corr baseline | 1250 | 0.58424845 |
+| 59k residual sample-corr baseline | 1500 | 0.58426899 |
+| prompt-consistency stats, 0.05 | 1250 | 0.58428280 |
+| prompt-consistency stats, 0.05 | 1500 | 0.58431531 |
+
+Full val1000 at step1500:
+
+| Run | Eval corr | Eval MSE | Eval MAE |
+| --- | ---: | ---: | ---: |
+| previous best 59k residual sample-corr | 0.58177344 | 0.66763517 | 0.60181215 |
+| prompt-consistency stats, 0.05 | 0.58184180 | 0.66763106 | 0.60181897 |
+
+This is the best full-val corr so far, but the gain is only `+0.00006835`.
+It is useful as a weak signal that directly regularizing prompt consistency can
+help a little, but it does not materially change the plateau.
+
 ## Interpretation
 
 Manual timbre control is practical in this codebase. The mean/std prompt is a
@@ -742,10 +780,12 @@ deterministic recon and the recon probe drops slightly. Raising that sample
 endpoint weight from `0.2` to `1.0` gives only a tiny sample-corr gain, so the
 issue is not just loss weighting. A learned attention pool over the first
 38 prompt tokens also ties the existing platform, so the bottleneck is not just
-using a more flexible global pooling function for the same same-clip prompt.
+using a more flexible global pooling function for the same same-clip prompt. A
+weak prompt-consistency mean/std loss is the current full-val best
+(`0.58184180`), but the improvement is only `+0.00006835`.
 Adding the remaining 9,144 ready lip-AVSR clips is the strongest positive move
 in the latest batch, but it only raises full eval to `0.58167589`, and the best
-short continuations only raise it to about `0.58177`. The remaining gap to 0.6
+short continuations only raise it to about `0.58184`. The remaining gap to 0.6
 is likely not just "missing speaker identity"; the deterministic MSE-style
 latent head is still averaging over speaker and spectral detail that is not
 recoverable from the current condition fusion.
@@ -778,5 +818,7 @@ Code support for `timbre_cond` and `audio_prompt` was covered by unit tests:
 - `uv run python -m py_compile scripts/eval_fm_avsr.py`
 - `uv run python -m unittest tests.test_fm_head_temporal_condition tests.test_eval_fm_avsr -v`
 - `python -m py_compile src/streaminlip/v2/fm_head.py scripts/train_fm_avsr.py scripts/eval_fm_avsr.py`
+- `uv run python -m unittest tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_masked_prompt_timbre_stats_loss_matches_prompt_mean_and_std tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_combine_training_losses_can_include_prompt_timbre_stats_loss -v`
+- `python -m py_compile scripts/train_fm_avsr.py`
 
 All individual training/eval runs in this note were kept under the 1-hour limit.

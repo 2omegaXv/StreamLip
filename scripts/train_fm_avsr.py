@@ -214,6 +214,8 @@ def parse_args():
                    help="Auxiliary deterministic reconstruction loss to a PCA-projected target.")
     p.add_argument("--lambda_timbre_stats", type=float, default=0.0,
                    help="Auxiliary post-prompt per-clip latent mean/std matching loss.")
+    p.add_argument("--lambda_prompt_timbre_stats", type=float, default=0.0,
+                   help="Auxiliary loss matching predicted post-prompt mean/std to audio prompt mean/std.")
     p.add_argument("--recon_target_pca_npz", default=None,
                    help="Optional PCA basis npz with mean/components for low-rank recon targets.")
     p.add_argument("--recon_target_pca_dim", type=int, default=0,
@@ -419,6 +421,37 @@ def masked_timbre_stats_loss(
     return torch.stack(losses).mean()
 
 
+def masked_prompt_timbre_stats_loss(
+    pred: torch.Tensor,
+    prompt: torch.Tensor | None,
+    lengths: torch.Tensor,
+    start_frame: int = 0,
+) -> torch.Tensor:
+    """Match predicted post-prompt latent mean/std to audio-prompt mean/std."""
+    if prompt is None or prompt.numel() == 0:
+        return pred.float().new_zeros(())
+    start_frame = max(int(start_frame), 0)
+    losses = []
+    for b in range(pred.shape[0]):
+        end = int(lengths[b].item())
+        start = min(start_frame, end)
+        if end <= start:
+            start = 0
+        pred_v = pred[b, start:end].float()
+        prompt_v = prompt[b].float()
+        if pred_v.numel() == 0 or prompt_v.numel() == 0:
+            continue
+        mean_loss = F.mse_loss(pred_v.mean(dim=0), prompt_v.mean(dim=0))
+        std_loss = F.mse_loss(
+            pred_v.std(dim=0, unbiased=False),
+            prompt_v.std(dim=0, unbiased=False),
+        )
+        losses.append(mean_loss + std_loss)
+    if not losses:
+        return pred.float().new_zeros(())
+    return torch.stack(losses).mean()
+
+
 def project_latent_to_pca_target(
     lat: torch.Tensor,
     mean: torch.Tensor | None,
@@ -598,6 +631,7 @@ def combine_training_losses(
     loss_sample_corr: torch.Tensor,
     loss_recon_pca: torch.Tensor,
     loss_timbre_stats: torch.Tensor,
+    loss_prompt_timbre_stats: torch.Tensor,
     loss_fm_weight: float,
     lambda_recon: float,
     lambda_sample_recon: float,
@@ -607,6 +641,7 @@ def combine_training_losses(
     lambda_sample_corr: float,
     lambda_recon_pca: float,
     lambda_timbre_stats: float,
+    lambda_prompt_timbre_stats: float,
 ) -> torch.Tensor:
     return (
         loss_fm_weight * loss_fm
@@ -618,6 +653,7 @@ def combine_training_losses(
         + lambda_sample_corr * loss_sample_corr
         + lambda_recon_pca * loss_recon_pca
         + lambda_timbre_stats * loss_timbre_stats
+        + lambda_prompt_timbre_stats * loss_prompt_timbre_stats
     )
 
 
@@ -1239,6 +1275,7 @@ def main():
                         or args.lambda_sample_corr > 0
                         or args.lambda_recon_pca > 0
                         or args.lambda_timbre_stats > 0
+                        or args.lambda_prompt_timbre_stats > 0
                     ):
                         pred_recon_raw = fm.reconstruct_from_cond(
                             v_down, h_down, spk,
@@ -1314,12 +1351,22 @@ def main():
                             )
                         else:
                             loss_timbre_stats = loss_fm.new_zeros(())
+                        if args.lambda_prompt_timbre_stats > 0:
+                            loss_prompt_timbre_stats = masked_prompt_timbre_stats_loss(
+                                pred_recon,
+                                audio_prompt,
+                                lat_lens,
+                                start_frame=args.metric_start_frame,
+                            )
+                        else:
+                            loss_prompt_timbre_stats = loss_fm.new_zeros(())
                     else:
                         loss_recon = loss_fm.new_zeros(())
                         loss_recon_corr = loss_fm.new_zeros(())
                         loss_sample_corr = loss_fm.new_zeros(())
                         loss_recon_pca = loss_fm.new_zeros(())
                         loss_timbre_stats = loss_fm.new_zeros(())
+                        loss_prompt_timbre_stats = loss_fm.new_zeros(())
                     if args.lambda_sample_recon > 0:
                         pred_sample_raw = fm.sample(
                             v_down, h_down, spk,
@@ -1375,6 +1422,7 @@ def main():
                         loss_sample_corr,
                         loss_recon_pca,
                         loss_timbre_stats,
+                        loss_prompt_timbre_stats,
                         args.loss_fm_weight,
                         args.lambda_recon,
                         args.lambda_sample_recon,
@@ -1384,7 +1432,9 @@ def main():
                         args.lambda_sample_corr,
                         args.lambda_recon_pca,
                         args.lambda_timbre_stats,
+                        args.lambda_prompt_timbre_stats,
                     )
+                    loss_timbre_stats_log = loss_timbre_stats + loss_prompt_timbre_stats
 
                 opt.zero_grad()
                 loss.backward()
@@ -1408,7 +1458,7 @@ def main():
                     "loss_recon_corr": f"{loss_recon_corr.item():.8f}",
                     "loss_sample_corr": f"{loss_sample_corr.item():.8f}",
                     "loss_recon_pca": f"{loss_recon_pca.item():.8f}",
-                    "loss_timbre_stats": f"{loss_timbre_stats.item():.8f}",
+                    "loss_timbre_stats": f"{loss_timbre_stats_log.item():.8f}",
                     "loss_total": f"{loss.item():.8f}",
                     "lr": f"{lr:.10e}",
                     "seconds_per_step": "",
@@ -1422,7 +1472,7 @@ def main():
                 last_save_recon_corr = loss_recon_corr.item()
                 last_save_sample_corr = loss_sample_corr.item()
                 last_save_recon_pca = loss_recon_pca.item()
-                last_save_timbre_stats = loss_timbre_stats.item()
+                last_save_timbre_stats = loss_timbre_stats_log.item()
                 last_save_total = loss.item()
                 last_save_lr = lr
 
@@ -1434,7 +1484,7 @@ def main():
                           f"pca {loss_recon_pca.item():.4f} | "
                           f"corr_loss {loss_recon_corr.item():.4f} | "
                           f"sample_corr {loss_sample_corr.item():.4f} | "
-                          f"timbre_stats {loss_timbre_stats.item():.4f} | "
+                          f"timbre_stats {loss_timbre_stats_log.item():.4f} | "
                           f"energy {loss_energy.item():.4f} | "
                           f"sample {loss_sample_recon.item():.4f} | "
                           f"denoise {loss_denoise.item():.4f} | "
@@ -1450,7 +1500,7 @@ def main():
                             "train/loss_recon_corr": loss_recon_corr.item(),
                             "train/loss_sample_corr": loss_sample_corr.item(),
                             "train/loss_recon_pca": loss_recon_pca.item(),
-                            "train/loss_timbre_stats": loss_timbre_stats.item(),
+                            "train/loss_timbre_stats": loss_timbre_stats_log.item(),
                             "train/loss_total": loss.item(),
                             "train/lr": lr,
                         }, step=step)
