@@ -266,3 +266,39 @@ for timbre control but causes a large validation drop (`-0.0181` versus E2).
 Therefore E3 is not a deployable final model. The final checkpoint for now
 remains E2, with first-3.04s export cropping and the documented limitation that
 the prompt representation is not yet a pure speaker embedding.
+
+### E4: Disable Prompt Cross-Attention at E2 Evaluation Only
+
+Hypothesis:
+
+Maybe the checkpoint only needs raw prompt tokens during training, and inference
+can remove them while preserving the learned frame/global timbre condition.
+This would be an immediate deploy-time fix for prompt content leakage.
+
+Eval command:
+
+```text
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml \
+  --ckpt runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt \
+  --use_recon --metrics_only --n 1000 --no_audio_prompt_cross_attn \
+  --output_dir eval_out/timbre_fix_e4_e2_no_promptxattn_eval_val1000 \
+  --metrics_json eval_out/timbre_fix_e4_e2_no_promptxattn_eval_val1000/metrics.json
+```
+
+Result:
+
+| Eval mode | corr | mse | mae | Decision |
+| --- | ---: | ---: | ---: | --- |
+| E2 normal | `0.58186685` | `0.66760399` | `0.60178062` | keep |
+| E2 eval-only no prompt x-attn | `0.55201229` | `0.70036560` | `0.62153375` | reject |
+
+Conclusion:
+
+Inference also depends on raw temporal prompt tokens. A deploy-time switch that
+removes prompt cross-attention is not viable. This strengthens the diagnosis:
+the present best checkpoint uses prompt sequence information as a strong
+condition, not just as speaker identity. The practical handoff remains E2 with
+post-prompt export cropping; a true fix requires retraining around a
+speaker-only/fixed-size timbre embedding or randomized reference-window
+training that prevents prompt-content copying.
