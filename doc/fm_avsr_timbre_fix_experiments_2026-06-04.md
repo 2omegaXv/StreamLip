@@ -726,3 +726,38 @@ Conclusion:
 Earlier adaptation does not help the no-prompt-cross-attn/stat-pool route. It
 stays in the same band as E6/E14. This rules out the current fixed-stat prompt
 pooling as a short-run substitute for temporal prompt tokens.
+
+### E16: Stronger Prompt Timbre-Stats Loss
+
+Hypothesis:
+
+The clean prompt routes lose too much corr, but E2 already has the best
+objective score. Increase `lambda_prompt_timbre_stats` from `0.05` to `0.20`
+while keeping the E2 temporal prompt architecture, to test whether stronger
+speaker/timbre statistics can improve perceptual timbre without destroying the
+historical-best corr.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats020_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats020_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58389010` | `0.64990659` | `0.59227694` | `0.72652030` | `156.66 s` | stop |
+
+Conclusion:
+
+Increasing the prompt timbre-stat loss to `0.20` keeps the model near E2 but
+drops below both E2 (`0.58434393`) and the historical best (`0.58431531`). It is
+not an acceptable final checkpoint under the current success gate. A milder
+weight is worth testing because this run did not collapse and remains close.
