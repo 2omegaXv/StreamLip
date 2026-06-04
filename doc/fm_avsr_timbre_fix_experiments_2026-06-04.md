@@ -547,3 +547,38 @@ risk, but they do not preserve the historical-best corr when adapted from the
 current E2 checkpoint. A real fix likely needs a training run that uses
 randomized/late references from the start or a dedicated speaker-only embedding
 that is independent of utterance timing.
+
+### E11: Earlier Switch to Same-Clip Late Prompt
+
+Hypothesis:
+
+E9/E10 might be low because the model had already specialized to prefix prompt
+content by E2 step 2000. Switch earlier, from the E2 predecessor at step 1250,
+to the cleaner `self_late_window` prompt regime and train for 250 steps.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from1250_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from1250_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1500 | `0.57844288` | `0.65622114` | `0.59524856` | `0.57847190` | `179.86 s` | stop |
+
+Conclusion:
+
+Switching to the cleaner late-window prompt earlier does not recover the
+historical-best score. It lands in the same band as E9/E10. This weakens the
+"too late to adapt" hypothesis and points to a more fundamental mismatch: the
+current architecture learns useful content from temporal prompt tokens, and a
+speaker-only route probably needs to be trained as a separate condition rather
+than obtained by short fine-tuning of the prompt-token model.
