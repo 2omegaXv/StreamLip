@@ -215,6 +215,7 @@ class FMHead(nn.Module):
         audio_prompt_dim: int = 0,
         audio_prompt_pool_cond: bool = False,
         audio_prompt_stat_pool_cond: bool = False,
+        audio_prompt_learned_pool_cond: bool = False,
         ctc_vocab_size: int = 0,
         ctc_topk: int = 0,
         ctc_token_emb_dim: int = 0,
@@ -227,6 +228,7 @@ class FMHead(nn.Module):
         self.audio_prompt_dim = audio_prompt_dim
         self.audio_prompt_pool_cond = audio_prompt_pool_cond
         self.audio_prompt_stat_pool_cond = audio_prompt_stat_pool_cond
+        self.audio_prompt_learned_pool_cond = audio_prompt_learned_pool_cond
         self.ctc_topk = ctc_topk
         self.ctc_token_emb_dim = ctc_token_emb_dim
         ctc_cond_dim = ctc_token_emb_dim + ctc_topk if ctc_topk > 0 else 0
@@ -249,6 +251,13 @@ class FMHead(nn.Module):
             self.audio_prompt_stat_pool_proj = nn.Linear(self.DIM * 2, self.DIM)
             nn.init.zeros_(self.audio_prompt_stat_pool_proj.weight)
             nn.init.zeros_(self.audio_prompt_stat_pool_proj.bias)
+        self.audio_prompt_learned_pool_score = None
+        self.audio_prompt_learned_pool_proj = None
+        if audio_prompt_dim > 0 and audio_prompt_learned_pool_cond:
+            self.audio_prompt_learned_pool_score = nn.Linear(self.DIM, 1)
+            self.audio_prompt_learned_pool_proj = nn.Linear(self.DIM, self.DIM)
+            nn.init.zeros_(self.audio_prompt_learned_pool_proj.weight)
+            nn.init.zeros_(self.audio_prompt_learned_pool_proj.bias)
         self.extra_pred_head = None
         if extra_cond_dim > 0:
             self.extra_pred_head = nn.Sequential(
@@ -359,6 +368,11 @@ class FMHead(nn.Module):
                 )
                 prompt_stats = torch.cat([prompt_mean, prompt_std], dim=-1)
                 cond = cond + self.audio_prompt_stat_pool_proj(prompt_stats).unsqueeze(1)
+            if self.audio_prompt_learned_pool_proj is not None:
+                score = self.audio_prompt_learned_pool_score(prompt_tokens).float()
+                weights = torch.softmax(score, dim=1).to(dtype=prompt_tokens.dtype)
+                pooled = (prompt_tokens * weights).sum(dim=1)
+                cond = cond + self.audio_prompt_learned_pool_proj(pooled).unsqueeze(1)
             cond_tokens = (
                 prompt_tokens if cond_tokens is None
                 else torch.cat([cond_tokens, prompt_tokens], dim=1)

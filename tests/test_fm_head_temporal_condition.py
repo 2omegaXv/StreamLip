@@ -291,6 +291,52 @@ class FMHeadTemporalConditionTest(unittest.TestCase):
             "CTC token ids were not represented by learned embeddings",
         )
 
+    def test_audio_prompt_learned_pool_condition_can_use_prompt_tokens(self):
+        torch.manual_seed(16)
+        model = FMHead(
+            n_layers=1,
+            audio_prompt_dim=512,
+            audio_prompt_learned_pool_cond=True,
+        ).eval()
+        vis = torch.randn(1, 4, 960)
+        h_lm = torch.randn(1, 4, 960)
+        spk = torch.randn(1, 256)
+        prompt_a = torch.zeros(1, 3, 512)
+        prompt_b = prompt_a.clone()
+        prompt_b[:, 1] = 1.0
+
+        with torch.no_grad():
+            model.audio_prompt_learned_pool_proj.weight.copy_(torch.eye(512))
+            model.audio_prompt_learned_pool_proj.bias.zero_()
+            cond_a, _ = model._build_cond(vis, h_lm, spk, audio_prompt=prompt_a)
+            cond_b, _ = model._build_cond(vis, h_lm, spk, audio_prompt=prompt_b)
+
+        self.assertFalse(
+            torch.allclose(cond_a, cond_b),
+            "learned audio prompt pool condition ignored prompt token values",
+        )
+
+    def test_audio_prompt_learned_pool_condition_starts_as_noop(self):
+        torch.manual_seed(17)
+        base = FMHead(n_layers=1, audio_prompt_dim=512).eval()
+        learned_pool = FMHead(
+            n_layers=1,
+            audio_prompt_dim=512,
+            audio_prompt_learned_pool_cond=True,
+        ).eval()
+        learned_pool.load_state_dict(base.state_dict(), strict=False)
+        vis = torch.randn(1, 4, 960)
+        h_lm = torch.randn(1, 4, 960)
+        spk = torch.randn(1, 256)
+        prompt = torch.randn(1, 3, 512)
+
+        with torch.no_grad():
+            cond_base, _ = base._build_cond(vis, h_lm, spk, audio_prompt=prompt)
+            cond_learned, _ = learned_pool._build_cond(vis, h_lm, spk, audio_prompt=prompt)
+
+        torch.testing.assert_close(cond_base, cond_learned)
+        self.assertIsNotNone(learned_pool.audio_prompt_learned_pool_proj)
+
 
 if __name__ == "__main__":
     unittest.main()

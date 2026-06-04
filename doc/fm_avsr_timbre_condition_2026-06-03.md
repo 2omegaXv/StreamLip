@@ -689,6 +689,37 @@ Training:
 Full eval at step1500 was `0.58105725`. This is a weak positive on corr but too
 small to justify further tuning of this exact loss.
 
+### Learned Prompt Pool
+
+Added an optional zero-initialized learned-attention pool over the first 38 Mimi
+prompt tokens:
+
+```text
+weights = softmax(linear(prompt_tokens))
+prompt_pool = sum(weights * prompt_tokens)
+cond += zero_init_linear(prompt_pool)
+```
+
+This keeps old checkpoints behavior-identical at load time while allowing the
+model to learn a stronger same-clip voice summary than plain mean pooling.
+Config:
+`configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_learnedpool_residual_samplecorr02_from1000_recon_textjson_wordts.yaml`.
+
+Training matched the current best 59k residual/sample-corr continuation except
+for `audio_prompt_learned_pool_cond: true`. It resumed from the 50k residual
+step1000 checkpoint, used the same residual base, and ran to step1500.
+
+| Run | Step | Small-val recon corr |
+| --- | ---: | ---: |
+| 59k residual sample-corr baseline | 1250 | 0.58424845 |
+| 59k residual sample-corr baseline | 1500 | 0.58426899 |
+| learned prompt pool | 1250 | 0.58426021 |
+| learned prompt pool | 1500 | 0.58426568 |
+
+The learned pool is an effective tie, finishing `0.00000331` below the baseline
+at step1500 on the small validation probe. Because it did not clear the existing
+small-val platform, no full-val1000 eval was run for this branch.
+
 ## Interpretation
 
 Manual timbre control is practical in this codebase. The mean/std prompt is a
@@ -709,7 +740,9 @@ Adding a weak sample endpoint loss makes the sampling path trainable on the
 current residual platform, but sampled output remains much worse than
 deterministic recon and the recon probe drops slightly. Raising that sample
 endpoint weight from `0.2` to `1.0` gives only a tiny sample-corr gain, so the
-issue is not just loss weighting.
+issue is not just loss weighting. A learned attention pool over the first
+38 prompt tokens also ties the existing platform, so the bottleneck is not just
+using a more flexible global pooling function for the same same-clip prompt.
 Adding the remaining 9,144 ready lip-AVSR clips is the strongest positive move
 in the latest batch, but it only raises full eval to `0.58167589`, and the best
 short continuations only raise it to about `0.58177`. The remaining gap to 0.6
@@ -743,5 +776,7 @@ Code support for `timbre_cond` and `audio_prompt` was covered by unit tests:
 - `uv run python -m py_compile scripts/train_fm_avsr.py scripts/eval_fm_avsr.py src/streaminlip/v2/fm_head.py`
 - `uv run python -m unittest tests.test_eval_fm_avsr -v`
 - `uv run python -m py_compile scripts/eval_fm_avsr.py`
+- `uv run python -m unittest tests.test_fm_head_temporal_condition tests.test_eval_fm_avsr -v`
+- `python -m py_compile src/streaminlip/v2/fm_head.py scripts/train_fm_avsr.py scripts/eval_fm_avsr.py`
 
 All individual training/eval runs in this note were kept under the 1-hour limit.

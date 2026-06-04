@@ -710,6 +710,24 @@ class FMAVSRDatasetTest(unittest.TestCase):
         finally:
             sys.argv = old_argv
 
+    def test_parse_args_loads_audio_prompt_learned_pool_from_config(self):
+        old_argv = sys.argv
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+                f.write("audio_prompt_learned_pool_cond: true\n")
+                f.flush()
+                sys.argv = [
+                    "scripts/train_fm_avsr.py",
+                    "--config",
+                    f.name,
+                ]
+
+                args = parse_args()
+
+            self.assertTrue(args.audio_prompt_learned_pool_cond)
+        finally:
+            sys.argv = old_argv
+
     def test_prepare_conditions_can_ablate_video_or_text(self):
         import torch
 
