@@ -431,3 +431,39 @@ does not satisfy the current success gate. The result suggests that same-video
 non-prefix prompt training is worth a longer run or from-scratch schedule, but
 the current short adaptation is not enough to claim the timbre issue is fixed
 while beating the historical best.
+
+### E8: Continue Same-Clip Non-Prefix Prompt Fine-Tuning
+
+Hypothesis:
+
+E7 was close enough to E2 that the main issue might be adaptation time. Continue
+from E7 step 2250 for one more 250-step interval, lower LR to `1e-5`, and check
+whether validation corr recovers toward or above the historical best.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selfwindowprompt_promptstats005_residual_samplecorr02_lossstart38_from2250_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selfwindowprompt_promptstats005_residual_samplecorr02_lossstart38_from2250_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2500 | `0.58000703` | `0.65450473` | `0.59448284` | `0.59605795` | `189.17 s` | stop |
+
+Conclusion:
+
+Continuing the same-window adaptation only improves E7 by `0.00022` corr and
+still remains below E2/historical best by about `0.0043`. This is not enough to
+claim a fixed timbre prompt route. The evidence now says short fine-tuning from
+E2 can partially adapt to a non-prefix same-video reference, but preserving the
+historical-best corr likely requires training this data regime from earlier in
+the schedule or replacing the temporal prompt with a dedicated speaker-only
+encoder.
