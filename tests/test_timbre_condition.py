@@ -114,6 +114,32 @@ class TimbreConditionTest(unittest.TestCase):
 
         self.assertGreater(float((cond_a - cond_b).detach().abs().sum()), 0.0)
 
+    def test_audio_prompt_stat_pool_condition_starts_as_noop(self):
+        torch.manual_seed(0)
+        mean_pool = FMHeadAVSR(
+            n_layers=1,
+            use_cross_attn=False,
+            audio_prompt_dim=512,
+            audio_prompt_pool_cond=True,
+        )
+        stat_pool = FMHeadAVSR(
+            n_layers=1,
+            use_cross_attn=False,
+            audio_prompt_dim=512,
+            audio_prompt_pool_cond=True,
+            audio_prompt_stat_pool_cond=True,
+        )
+        stat_pool.load_state_dict(mean_pool.state_dict(), strict=False)
+        v = torch.zeros(2, 4, 768)
+        h = torch.zeros(2, 4, 960)
+        spk = torch.zeros(2, 256)
+        prompt = torch.randn(2, 3, 512)
+
+        cond_mean, _ = mean_pool._build_cond(v, h, spk, audio_prompt=prompt)
+        cond_stat, _ = stat_pool._build_cond(v, h, spk, audio_prompt=prompt)
+
+        torch.testing.assert_close(cond_stat, cond_mean)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -214,6 +214,7 @@ class FMHead(nn.Module):
         timbre_condition_dim: int = 0,
         audio_prompt_dim: int = 0,
         audio_prompt_pool_cond: bool = False,
+        audio_prompt_stat_pool_cond: bool = False,
         ctc_vocab_size: int = 0,
         ctc_topk: int = 0,
         ctc_token_emb_dim: int = 0,
@@ -225,6 +226,7 @@ class FMHead(nn.Module):
         self.timbre_condition_dim = timbre_condition_dim
         self.audio_prompt_dim = audio_prompt_dim
         self.audio_prompt_pool_cond = audio_prompt_pool_cond
+        self.audio_prompt_stat_pool_cond = audio_prompt_stat_pool_cond
         self.ctc_topk = ctc_topk
         self.ctc_token_emb_dim = ctc_token_emb_dim
         ctc_cond_dim = ctc_token_emb_dim + ctc_topk if ctc_topk > 0 else 0
@@ -242,6 +244,11 @@ class FMHead(nn.Module):
         self.audio_prompt_proj = (
             nn.Linear(audio_prompt_dim, self.DIM) if audio_prompt_dim > 0 else None
         )
+        self.audio_prompt_stat_pool_proj = None
+        if audio_prompt_dim > 0 and audio_prompt_stat_pool_cond:
+            self.audio_prompt_stat_pool_proj = nn.Linear(self.DIM * 2, self.DIM)
+            nn.init.zeros_(self.audio_prompt_stat_pool_proj.weight)
+            nn.init.zeros_(self.audio_prompt_stat_pool_proj.bias)
         self.extra_pred_head = None
         if extra_cond_dim > 0:
             self.extra_pred_head = nn.Sequential(
@@ -345,6 +352,13 @@ class FMHead(nn.Module):
             )
             if self.audio_prompt_pool_cond:
                 cond = cond + prompt_tokens.mean(dim=1, keepdim=True)
+            if self.audio_prompt_stat_pool_proj is not None:
+                prompt_mean = prompt_tokens.mean(dim=1)
+                prompt_std = prompt_tokens.float().std(dim=1, unbiased=False).to(
+                    dtype=prompt_tokens.dtype
+                )
+                prompt_stats = torch.cat([prompt_mean, prompt_std], dim=-1)
+                cond = cond + self.audio_prompt_stat_pool_proj(prompt_stats).unsqueeze(1)
             cond_tokens = (
                 prompt_tokens if cond_tokens is None
                 else torch.cat([cond_tokens, prompt_tokens], dim=1)
