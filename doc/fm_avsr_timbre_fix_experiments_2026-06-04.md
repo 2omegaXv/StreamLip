@@ -622,3 +622,38 @@ Reversing the prompt order drops validation corr below the same-parent and
 late-window prompt variants. This is strong evidence that the current model uses
 the temporal order of prompt tokens as meaningful content, not just speaker
 style statistics. Reversed prompt order is not a viable mitigation.
+
+### E13: Earlier Switch From Step 1000 to Same-Clip Late Prompt
+
+Hypothesis:
+
+E11 switched to `self_late_window` from step 1250 and still landed near
+`0.5784`. The model might already depend on prefix prompt content by then. Use
+the earlier predecessor checkpoint at step 1000 and train 250 steps with
+late-window prompt, prompt-stats loss, sample-corr loss, and `loss_start=38`.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from1000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from1000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1250 | `0.57817590` | `0.65641867` | `0.59533750` | `0.58951890` | `180.54 s` | stop |
+
+Conclusion:
+
+Switching to the clean late-window regime from step 1000 does not improve over
+E9/E10/E11. This closes the "switch earlier from a prefix-prompt checkpoint"
+branch for these short experiments. The clean prompt distribution consistently
+lands around `0.578`, while the high-corr E2 path relies on temporal prefix
+prompt content.
