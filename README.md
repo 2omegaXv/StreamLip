@@ -106,6 +106,13 @@ The silent input is `data/trump.mov` with the final 3 seconds removed and all
 audio stripped. The reference file is the final 3 seconds of the same source
 video, kept with audio for timbre/audio-prompt conditioning.
 
+Recommended usage: if the original audio is only partially masked, use an
+unmasked segment from the same video as `--ref_audio`. The first 3.04 seconds of
+the reference must contain valid speech/audio, because the current model uses
+only those first 38 Mimi frames as the audio prompt and timbre condition. This
+lets the pipeline recover the missing silent video content with the same
+speaker/timbre style instead of requiring a separate speaker reference.
+
 Reproduce the generated full-length output:
 
 ```bash
