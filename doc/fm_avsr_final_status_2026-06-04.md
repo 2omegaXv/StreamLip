@@ -3,6 +3,7 @@
 本文是当前分支的收口说明。更长的实验过程记录见：
 
 - `doc/fm_avsr_timbre_condition_2026-06-03.md`
+- `doc/fm_avsr_timbre_condition_risks_2026-06-04.md`
 - `doc/fm_avsr_audio_generation_architecture.md`
 - `doc/raw_video_avsr_recon_pipeline_usage.md`
 
