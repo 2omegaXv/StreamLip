@@ -348,3 +348,86 @@ checkpoint cannot be converted into a speaker-only/timbre-only prompt model by
 short fine-tuning from E2. The deployable checkpoint remains E2, and a true
 speaker-only solution likely needs longer training with randomized references
 from the start or a separate pretrained speaker/timbre encoder.
+
+### E6: Fine-Tune E2 With Prompt Cross-Attention Disabled
+
+Hypothesis:
+
+E4 showed a direct eval-time removal of raw prompt cross-attention drops corr to
+`0.5520`. A short fine-tune from E2 might migrate the useful speaker/style
+information into `audio_prompt_pool_cond` and `timbre_cond` while removing the
+sequence-level content-copy route.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_nopromptxattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_nopromptxattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.56430187` | `0.67164683` | `0.60580907` | `0.58734846` | `184.49 s` | stop |
+
+Conclusion:
+
+Short fine-tuning cannot recover the E2 score after removing raw prompt
+cross-attention. This repeats the E1/E4 conclusion with a stronger
+initialization and lower LR: the current high-corr model uses temporal prompt
+tokens as a major condition, not only as pooled speaker statistics.
+
+### E7: Same-Clip Non-Prefix Prompt Window
+
+Hypothesis:
+
+The practical silent-ref workflow often uses an unmasked segment from the same
+video, not necessarily the target opening. Training with a same-clip non-prefix
+window should preserve speaker/session information while breaking the direct
+copying path for the first 3.04 s. The dataset mode
+`audio_prompt_ref_mode=self_random_window` currently takes a deterministic
+post-prefix window starting at frame 38 when the clip is long enough, falling
+back to the prefix for short clips.
+
+Code/config:
+
+- `FMAVSRDataset(audio_prompt_ref_mode="self_random_window")`
+  - uses the same clip as reference;
+  - starts the prompt window at frame 38 when possible;
+  - keeps shape `(audio_prompt_frames, 512)`.
+- `scripts/train_fm_avsr.py`
+  - accepts the new ref mode from CLI/config.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selfwindowprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selfwindowprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.57978476` | `0.65472100` | `0.59459168` | `0.60845828` | `158.70 s` | stop |
+
+Conclusion:
+
+This is the best prompt-cleaning direction so far: it is much closer to E2 than
+pooled-only, no-prompt-cross-attn, or same-parent prompting. However, it still
+drops about `0.0046` validation corr versus E2 (`0.58434393`) and therefore
+does not satisfy the current success gate. The result suggests that same-video
+non-prefix prompt training is worth a longer run or from-scratch schedule, but
+the current short adaptation is not enough to claim the timbre issue is fixed
+while beating the historical best.

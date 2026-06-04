@@ -291,7 +291,11 @@ class FMAVSRDataset(Dataset):
         self.timbre_condition_name = timbre_condition_name
         self.audio_prompt_frames = max(int(audio_prompt_frames), 0)
         self.audio_prompt_ref_mode = audio_prompt_ref_mode
-        if self.audio_prompt_ref_mode not in {"self_prefix", "same_parent_next"}:
+        if self.audio_prompt_ref_mode not in {
+            "self_prefix",
+            "same_parent_next",
+            "self_random_window",
+        }:
             raise ValueError(f"unknown audio_prompt_ref_mode: {self.audio_prompt_ref_mode}")
         self._same_parent_next = self._build_same_parent_next_refs(clips)
         self.load_energy = load_energy
@@ -317,6 +321,13 @@ class FMAVSRDataset(Dataset):
         if self.audio_prompt_ref_mode == "same_parent_next":
             return self._same_parent_next.get(clip, clip)
         return clip
+
+    def _audio_prompt_start(self, prompt_lat: np.ndarray) -> int:
+        if self.audio_prompt_ref_mode != "self_random_window":
+            return 0
+        if prompt_lat.shape[0] <= self.audio_prompt_frames:
+            return 0
+        return min(38, prompt_lat.shape[0] - self.audio_prompt_frames)
 
     def __getitem__(self, idx):
         c = self.clips[idx]
@@ -348,8 +359,10 @@ class FMAVSRDataset(Dataset):
             audio_prompt = np.zeros(
                 (self.audio_prompt_frames, prompt_lat.shape[1]), dtype=np.float32
             )
-            n_prompt = min(self.audio_prompt_frames, prompt_lat.shape[0])
-            audio_prompt[:n_prompt] = prompt_lat[:n_prompt]
+            prompt_start = self._audio_prompt_start(prompt_lat)
+            prompt_end = min(prompt_start + self.audio_prompt_frames, prompt_lat.shape[0])
+            n_prompt = max(prompt_end - prompt_start, 0)
+            audio_prompt[:n_prompt] = prompt_lat[prompt_start:prompt_end]
         energy = (
             load_log_rms_energy(c, lat.shape[0]).astype("float32")
             if self.load_energy else None

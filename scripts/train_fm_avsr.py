@@ -137,7 +137,7 @@ def parse_args():
     p.add_argument("--audio_prompt_frames", type=int, default=0,
                    help="Use this many normalized Mimi prefix frames as audio prompt tokens.")
     p.add_argument("--audio_prompt_ref_mode",
-                   choices=["self_prefix", "same_parent_next"],
+                   choices=["self_prefix", "same_parent_next", "self_random_window"],
                    default="self_prefix",
                    help="Source clip for training audio prompt construction.")
     p.add_argument("--audio_prompt_dim", type=int, default=0,
