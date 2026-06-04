@@ -35,6 +35,7 @@ from streaminlip.fm_avsr_dataset import (
 )
 from scripts.train_fm_avsr import (
     append_residual_base_condition,
+    checkpoint_cond_layout,
     compose_endpoint_prediction,
     load_fm_head_state,
     predict_energy_condition,
@@ -371,7 +372,18 @@ def main():
     ).to(device).bfloat16().eval()
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     report = load_fm_head_state(
-        fm, ckpt["fm_head"], allow_partial=args.allow_partial_resume
+        fm,
+        ckpt["fm_head"],
+        allow_partial=args.allow_partial_resume,
+        cond_layout=checkpoint_cond_layout(
+            ckpt,
+            new_timbre_dim=args.timbre_condition_dim,
+            new_extra_dim=train_extra_dim,
+            new_ctc_dim=(
+                args.ctc_token_emb_dim + ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk)
+                if ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk) > 0 else 0
+            ),
+        ),
     )
     print(f"  Loaded {args.ckpt}")
     if args.allow_partial_resume:
@@ -401,6 +413,15 @@ def main():
             residual_base,
             base_ckpt["fm_head"],
             allow_partial=args.allow_partial_resume,
+            cond_layout=checkpoint_cond_layout(
+                base_ckpt,
+                new_timbre_dim=args.timbre_condition_dim,
+                new_extra_dim=base_extra_dim,
+                new_ctc_dim=(
+                    args.ctc_token_emb_dim + ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk)
+                    if ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk) > 0 else 0
+                ),
+            ),
         )
         print(f"  Loaded residual baseline {args.residual_base_ckpt}")
         if args.allow_partial_resume:

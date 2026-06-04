@@ -430,6 +430,7 @@ def load_fm_head_state(
     module: nn.Module,
     checkpoint_state: dict[str, torch.Tensor],
     allow_partial: bool = False,
+    cond_layout: dict[str, int] | None = None,
 ) -> dict[str, list[str]]:
     """Load an FM head, optionally copying matching slices for expanded Linear inputs."""
     if not allow_partial:
@@ -450,6 +451,44 @@ def load_fm_head_state(
             adapted[name] = old_value.to(dtype=new_value.dtype)
             loaded.append(name)
             continue
+        if name == "cond_proj.weight" and cond_layout is not None and old_value.ndim == 2 and new_value.ndim == 2:
+            old_base = int(cond_layout.get("base_dim", 0))
+            old_timbre = int(cond_layout.get("old_timbre_dim", 0))
+            new_timbre = int(cond_layout.get("new_timbre_dim", 0))
+            old_extra = int(cond_layout.get("old_extra_dim", 0))
+            new_extra = int(cond_layout.get("new_extra_dim", old_extra))
+            old_ctc = int(cond_layout.get("old_ctc_dim", 0))
+            new_ctc = int(cond_layout.get("new_ctc_dim", old_ctc))
+            if (
+                old_base + old_timbre + old_extra + old_ctc == old_value.shape[1]
+                and old_base + new_timbre + new_extra + new_ctc == new_value.shape[1]
+                and old_base <= new_value.shape[1]
+                and old_timbre <= new_timbre
+                and old_extra <= new_extra
+                and old_ctc <= new_ctc
+            ):
+                expanded = torch.zeros_like(new_value)
+                expanded[:, :old_base] = old_value[:, :old_base].to(
+                    device=expanded.device, dtype=expanded.dtype
+                )
+                old_t0 = old_base
+                new_t0 = old_base
+                expanded[:, new_t0:new_t0 + old_timbre] = old_value[
+                    :, old_t0:old_t0 + old_timbre
+                ].to(device=expanded.device, dtype=expanded.dtype)
+                old_e0 = old_t0 + old_timbre
+                new_e0 = new_t0 + new_timbre
+                expanded[:, new_e0:new_e0 + old_extra] = old_value[
+                    :, old_e0:old_e0 + old_extra
+                ].to(device=expanded.device, dtype=expanded.dtype)
+                old_c0 = old_e0 + old_extra
+                new_c0 = new_e0 + new_extra
+                expanded[:, new_c0:new_c0 + old_ctc] = old_value[
+                    :, old_c0:old_c0 + old_ctc
+                ].to(device=expanded.device, dtype=expanded.dtype)
+                adapted[name] = expanded
+                partial.append(name)
+                continue
         if (
             old_value.ndim == new_value.ndim
             and old_value.shape[0] == new_value.shape[0]
@@ -464,6 +503,40 @@ def load_fm_head_state(
         skipped.append(name)
     module.load_state_dict(adapted)
     return {"loaded": sorted(loaded), "partial": sorted(partial), "skipped": sorted(skipped)}
+
+
+def checkpoint_cond_layout(
+    ckpt: dict,
+    *,
+    new_timbre_dim: int,
+    new_extra_dim: int,
+    new_ctc_dim: int,
+    base_dim: int = 768 + 960 + 256,
+) -> dict[str, int] | None:
+    args = ckpt.get("args")
+    if not isinstance(args, dict):
+        return None
+    old_timbre_dim = int(args.get("timbre_condition_dim") or 0)
+    old_extra_dim = (
+        ctc_extra_dim(args.get("ctc_condition_mode", "none"), int(args.get("ctc_vocab_size") or 5049))
+        + energy_extra_dim(args.get("energy_condition_mode", "none"))
+    )
+    old_ctc_topk = ctc_topk_dim(
+        args.get("ctc_condition_mode", "none"), int(args.get("ctc_topk") or 4)
+    )
+    old_ctc_dim = (
+        int(args.get("ctc_token_emb_dim") or 32) + old_ctc_topk
+        if old_ctc_topk > 0 else 0
+    )
+    return {
+        "base_dim": int(base_dim),
+        "old_timbre_dim": old_timbre_dim,
+        "new_timbre_dim": int(new_timbre_dim),
+        "old_extra_dim": old_extra_dim,
+        "new_extra_dim": int(new_extra_dim),
+        "old_ctc_dim": old_ctc_dim,
+        "new_ctc_dim": int(new_ctc_dim),
+    }
 
 
 def compose_residual_prediction(
@@ -896,7 +969,18 @@ def main():
     if args.resume_ckpt:
         ckpt = torch.load(args.resume_ckpt, map_location="cpu", weights_only=False)
         report = load_fm_head_state(
-            fm, ckpt["fm_head"], allow_partial=args.allow_partial_resume
+            fm,
+            ckpt["fm_head"],
+            allow_partial=args.allow_partial_resume,
+            cond_layout=checkpoint_cond_layout(
+                ckpt,
+                new_timbre_dim=args.timbre_condition_dim,
+                new_extra_dim=train_extra_dim,
+                new_ctc_dim=(
+                    args.ctc_token_emb_dim + ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk)
+                    if ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk) > 0 else 0
+                ),
+            ),
         )
         resume_step = int(ckpt.get("step", 0))
         print(f"  resumed {args.resume_ckpt} at step={resume_step}")
@@ -929,6 +1013,15 @@ def main():
             residual_base,
             base_ckpt["fm_head"],
             allow_partial=args.allow_partial_resume,
+            cond_layout=checkpoint_cond_layout(
+                base_ckpt,
+                new_timbre_dim=args.timbre_condition_dim,
+                new_extra_dim=base_extra_dim,
+                new_ctc_dim=(
+                    args.ctc_token_emb_dim + ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk)
+                    if ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk) > 0 else 0
+                ),
+            ),
         )
         for p in residual_base.parameters():
             p.requires_grad_(False)

@@ -9,7 +9,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from scripts.extract_timbre_cond import build_timbre_condition
+from scripts.extract_timbre_cond import build_mel_stats, build_timbre_condition
 from scripts.train_fm_avsr import FMHeadAVSR
 
 
@@ -32,6 +32,27 @@ class TimbreConditionTest(unittest.TestCase):
         self.assertEqual(cond.shape, (1024,))
         np.testing.assert_allclose(cond[:512], 1.0)
         np.testing.assert_allclose(cond[512:], 0.0)
+
+    def test_build_timbre_condition_can_append_log_mel_stats(self):
+        latent = np.ones((2, 512), dtype=np.float32)
+        mel_stats = np.linspace(-1.0, 1.0, 160, dtype=np.float32)
+
+        cond = build_timbre_condition(latent, prompt_frames=2, extra_stats=mel_stats)
+
+        self.assertEqual(cond.shape, (1184,))
+        np.testing.assert_allclose(cond[:512], 1.0)
+        np.testing.assert_allclose(cond[512:1024], 0.0)
+        np.testing.assert_allclose(cond[1024:], mel_stats)
+
+    def test_build_mel_stats_returns_mean_and_std_for_prompt_audio(self):
+        sr = 16000
+        audio = np.sin(np.linspace(0.0, 32.0 * np.pi, sr, dtype=np.float32))
+
+        stats = build_mel_stats(audio, sr, prompt_seconds=1.0, n_mels=40)
+
+        self.assertEqual(stats.shape, (80,))
+        self.assertTrue(np.isfinite(stats).all())
+        self.assertGreater(float(stats[40:].max()), 0.0)
 
     def test_fm_head_accepts_timbre_condition_and_keeps_output_shape(self):
         fm = FMHeadAVSR(n_layers=1, timbre_condition_dim=1024)

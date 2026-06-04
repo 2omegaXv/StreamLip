@@ -587,6 +587,40 @@ class FMAVSRDatasetTest(unittest.TestCase):
         torch.testing.assert_close(model.weight[:, 3:], torch.zeros(2, 2))
         torch.testing.assert_close(model.bias, old_state["bias"])
 
+    def test_load_fm_head_state_can_insert_new_timbre_columns_before_extra_condition(self):
+        import torch
+
+        class TinyHead(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.cond_proj = torch.nn.Linear(7, 1)
+
+        model = TinyHead()
+        old_state = {
+            "cond_proj.weight": torch.tensor([[10.0, 11.0, 20.0, 21.0, 30.0]]),
+            "cond_proj.bias": torch.tensor([1.0]),
+        }
+
+        report = load_fm_head_state(
+            model,
+            old_state,
+            allow_partial=True,
+            cond_layout={
+                "base_dim": 2,
+                "old_timbre_dim": 2,
+                "new_timbre_dim": 4,
+                "old_extra_dim": 1,
+                "new_extra_dim": 1,
+            },
+        )
+
+        self.assertEqual(report["partial"], ["cond_proj.weight"])
+        torch.testing.assert_close(
+            model.cond_proj.weight,
+            torch.tensor([[10.0, 11.0, 20.0, 21.0, 0.0, 0.0, 30.0]]),
+        )
+        torch.testing.assert_close(model.cond_proj.bias, old_state["cond_proj.bias"])
+
     def test_partial_load_keeps_old_fm_output_when_new_ctc_condition_is_zero(self):
         import torch
 

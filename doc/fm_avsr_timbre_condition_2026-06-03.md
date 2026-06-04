@@ -315,6 +315,7 @@ Combined 59,144 split:
 | 59k residual + denoise loss | 1500 | 0.58176819 | 0.66763995 | 0.60180507 | effectively saturated |
 | 59k residual + CTC top-k condition | 1500 | 0.58177180 | 0.66764077 | 0.60178911 | `ctc_condition_mode=topk`; effectively tied with denoise |
 | 59k residual + per-sample corr loss | 1500 | 0.58177344 | 0.66763517 | 0.60181215 | `lambda_sample_corr=0.2`; effectively tied with CTC/denoise |
+| 12k residual + Mimi/Mel timbre cond | 1500 | n/a | n/a | n/a | quick signal only; small val corr `0.58422178`, below platform |
 
 The 50k scale-up improved the best full eval from `0.57255184` to
 `0.58091919`. Residual timbre-stat continuation added only `+0.00013806`
@@ -443,6 +444,69 @@ This is only `+0.00000164` over the CTC top-k step1500 full eval
 `+0.000385`. The loss is implemented and useful as a diagnostic, but this
 weight and continuation do not produce a meaningful move toward `0.6`.
 
+### Mimi/Mel Timbre Condition
+
+Run:
+`runs/fm_avsr/lipavsr_12000_timbre3s_mel80_audioprompt38_pool_residual_from1000_recon_textjson_wordts_v1`
+
+Config:
+`configs/fm_avsr_lipavsr_59144_timbre3s_mel80_audioprompt38_pool_residual_from1000_recon_textjson_wordts.yaml`
+
+This condition appends audio-waveform log-mel statistics to the existing Mimi
+prefix timbre summary:
+
+```text
+timbre_mel_cond.npy = concat(
+    mean(normalized_mimi_prefix),
+    std(normalized_mimi_prefix),
+    mean(log_mel_prefix),
+    std(log_mel_prefix),
+)
+```
+
+With 80 mel bins, the condition dimension is `1184` instead of `1024`. This is
+still a lightweight audio-derived timbre entry and does not require downloading
+a speaker-recognition model. The first 3 seconds are used, matching the
+existing audio-prompt window.
+
+Because adding 160 timbre columns shifts any later `extra_cond` columns in
+`cond_proj`, the partial checkpoint loader now supports an explicit condition
+layout. Old base/video/text/speaker columns are copied, old timbre columns are
+copied into the front of the new timbre block, newly added mel-stat columns are
+zero-initialized, and old energy/CTC columns are copied to their new positions.
+This avoids accidentally mapping the old predicted-energy weight onto the first
+new mel-stat column.
+
+Extraction checks:
+
+- 5-clip smoke: `Done: 5  Skip: 0  Missing: 0  Err: 0`
+- val1000 extraction: `Done: 1000  Skip: 0  Missing: 0  Err: 0`
+- 12k train subset: all first 12,000 train clips had `timbre_mel_cond.npy`
+- full 59k extraction was stopped after the quick signal test showed no gain
+
+Training:
+
+- resume: 59k residual step1000
+- residual base: 59k pooled prompt step5000
+- train subset: first 12,000 ready mel-timbre clips
+- `timbre_condition_name: timbre_mel_cond.npy`
+- `timbre_condition_dim: 1184`
+- `lr: 5e-5`
+- max extra steps: 500
+- elapsed: about 18 minutes to step1500
+
+Small validation results:
+
+| Step | Val recon corr | Val recon MSE | Val recon MAE |
+| ---: | ---: | ---: | ---: |
+| 1250 | 0.58422307 | 0.64905207 | 0.59179924 |
+| 1500 | 0.58422178 | 0.64904983 | 0.59179488 |
+
+The prior 59k residual/denoise/CTC/sample-corr continuations sit around
+`0.58427` on this same small validation protocol, so the waveform log-mel
+statistics do not show a positive signal. I therefore did not spend a full
+val1000 eval on this checkpoint.
+
 ### Prompt Calibration Diagnostics
 
 A one-off full-val diagnostic tested whether the first 38 prompt frames could be
@@ -505,7 +569,9 @@ condition also fails to improve full eval. Adding CTC top-k posterior tokens as
 an extra per-frame condition is also effectively a tie, improving full-val corr
 by only `0.00000361`. A per-sample corr loss aligned to the full-eval
 aggregation is also effectively tied, improving full-val corr by only
-`0.00000164` over CTC top-k. Adding the remaining 9,144 ready lip-AVSR clips is
+`0.00000164` over CTC top-k. Appending simple waveform log-mel prefix statistics
+to the timbre condition also failed its quick signal check, landing below the
+existing small-val platform. Adding the remaining 9,144 ready lip-AVSR clips is
 the strongest positive move in the latest batch, but it only raises full eval to
 `0.58167589`, and the best short continuations only raise it to about
 `0.58177`. The remaining gap to 0.6 is likely not just "missing speaker
@@ -532,5 +598,8 @@ Code support for `timbre_cond` and `audio_prompt` was covered by unit tests:
 - `uv run python -m unittest tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_masked_sample_corr_loss_averages_per_clip_correlation tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_combine_training_losses_can_include_sample_corr_loss -v`
 - `uv run python -m unittest tests.test_eval_fm_avsr tests.test_fm_avsr_dataset -v`
 - `uv run python -m py_compile scripts/train_fm_avsr.py scripts/eval_fm_avsr.py`
+- `uv run python -m unittest tests.test_timbre_condition -v`
+- `uv run python -m unittest tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_load_fm_head_state_can_expand_cond_projection tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_load_fm_head_state_can_insert_new_timbre_columns_before_extra_condition tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_partial_load_keeps_old_fm_output_when_new_ctc_condition_is_zero -v`
+- `uv run python -m py_compile scripts/train_fm_avsr.py scripts/eval_fm_avsr.py scripts/extract_timbre_cond.py`
 
 All individual training/eval runs in this note were kept under the 1-hour limit.
