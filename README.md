@@ -93,13 +93,13 @@ from the exported listening videos.
 
 ### Silent Reference Demo
 
-Use the checked-in full-length silent/reference example. It is the only
+Use the checked-in silent/reference example. It is the only
 documented silent-mode demo for this branch.
 
 ```text
 data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4
 data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4
-data/assets/trump_silent_ref_demo/trump_silent_ref_demo_full_pred_full.mp4
+data/assets/trump_silent_ref_demo/trump_silent_ref_demo_full_pred_post3s.mp4
 ```
 
 The silent input is `data/trump.mov` with the final 3 seconds removed and all
@@ -113,7 +113,11 @@ only those first 38 Mimi frames as the audio prompt and timbre condition. This
 lets the pipeline recover the missing silent video content with the same
 speaker/timbre style instead of requiring a separate speaker reference.
 
-Reproduce the generated full-length output:
+Current hack / TODO: the model can copy the reference prompt audio into the
+first generated seconds. Until this is fixed in the model, silent-mode exports
+drop the first 3.04 seconds and produce a post-prompt listening video.
+
+Reproduce the generated post-3.04s output:
 
 ```bash
 /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
@@ -128,7 +132,7 @@ Reproduce the generated full-length output:
 Expected generated video:
 
 ```text
-eval_out/trump_silent_ref_demo_full/trump_silent_ref_demo_full_pred_full.mp4
+eval_out/trump_silent_ref_demo_full/trump_silent_ref_demo_full_pred_post3s.mp4
 ```
 
 ## GUI

@@ -1,7 +1,7 @@
 # Trump Silent Reference Demo
 
-This folder contains a full-length silent-input/reference-audio demo for the
-final AVSR reconstruction pipeline.
+This folder contains a silent-input/reference-audio demo for the final AVSR
+reconstruction pipeline.
 
 Source video:
 
@@ -15,7 +15,11 @@ Assets:
 | --- | ---: | --- |
 | `trump_silent_input_no_tail3s.mp4` | 26.567 s | `data/trump.mov` with the final 3 seconds removed and all audio removed. |
 | `trump_ref_tail3s.mp4` | 3.015 s | The final 3 seconds of `data/trump.mov`, kept with audio, used as reference audio/timbre prompt. |
-| `trump_silent_ref_demo_full_pred_full.mp4` | 26.560 s | Generated silent-mode output with synthesized audio muxed onto the silent input video. |
+| `trump_silent_ref_demo_full_pred_post3s.mp4` | 23.552 s | Generated silent-mode output after dropping the first 3.04 seconds. |
+
+Current hack / TODO: the model can copy the reference prompt audio into the
+first generated seconds. Until this is fixed in the model, silent-mode exports
+drop the first 3.04 seconds and provide a post-prompt listening video.
 
 Reproduce the output:
 
@@ -32,11 +36,11 @@ Reproduce the output:
 The pipeline output is:
 
 ```text
-eval_out/trump_silent_ref_demo_full/trump_silent_ref_demo_full_pred_full.mp4
+eval_out/trump_silent_ref_demo_full/trump_silent_ref_demo_full_pred_post3s.mp4
 ```
 
 The checked-in copy is:
 
 ```text
-data/assets/trump_silent_ref_demo/trump_silent_ref_demo_full_pred_full.mp4
+data/assets/trump_silent_ref_demo/trump_silent_ref_demo_full_pred_post3s.mp4
 ```

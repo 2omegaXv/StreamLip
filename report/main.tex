@@ -392,15 +392,18 @@ with the text source switched from \texttt{text\_json} to
 
 For silent video, the video supplies lip and face conditions while an optional
 reference audio supplies $A$ and $q$. If no reference audio is provided, the
-audio prompt and timbre vector are zero. The generated MP4 keeps the full input
-duration.
+audio prompt and timbre vector are zero. The current demo export drops the
+first 3.04 seconds because the model can copy reference-prompt audio into the
+beginning of the generated waveform. This is a temporary export-time hack and
+is listed as a model issue to fix.
 
 \begin{figure}[h]
     \centering
     \includegraphics[width=\linewidth]{assets/silent_ref_pipeline.png}
     \caption{Silent-video inference with optional reference audio. This is an
     application of the same audio-prompt/timbre conditioning mechanism used in
-    training.}
+    training. Current listening exports skip the first 3.04 seconds to avoid
+    reference-prompt leakage at the start.}
     \label{fig:silent_ref}
 \end{figure}
 
@@ -437,6 +440,10 @@ so the result can be reproduced and demonstrated.
     speaker-specific acoustic detail, which explains some mixed-voice artifacts.
     \item Timbre control is based on prompt latents and prompt statistics. It is
     useful, but it is not equivalent to a high-fidelity speaker cloning model.
+    \item The current silent-reference export skips the first 3.04 seconds
+    because the model can copy prompt/reference audio at the beginning. A proper
+    fix should prevent prompt leakage inside the model rather than relying on
+    export-time cropping.
     \item External videos remain harder than LRS3 because of domain shift,
     crop quality, missing word timestamps, and imperfect Auto-AVSR text.
     \item Latent correlation is a useful paired-condition metric, but it is not

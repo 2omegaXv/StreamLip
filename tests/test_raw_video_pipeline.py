@@ -32,12 +32,12 @@ class RawVideoPipelineTest(unittest.TestCase):
         self.assertEqual(timbre.shape, (1024,))
         np.testing.assert_allclose(timbre, 0.0)
 
-    def test_silent_mode_keeps_full_length_output_names(self):
+    def test_silent_mode_exports_post_prompt_output_names(self):
         pred_name, gt_name = result_video_names("demo", silent_input=True)
 
-        self.assertEqual(pred_name, "demo_pred_full.mp4")
+        self.assertEqual(pred_name, "demo_pred_post3s.mp4")
         self.assertIsNone(gt_name)
-        self.assertEqual(recon_wav_start_frame(silent_input=True), 0)
+        self.assertEqual(recon_wav_start_frame(silent_input=True), 38)
 
     def test_audio_prompt_mode_keeps_existing_post_prompt_names(self):
         pred_name, gt_name = result_video_names("demo", silent_input=False)

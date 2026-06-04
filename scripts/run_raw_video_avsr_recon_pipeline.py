@@ -8,7 +8,7 @@ flow used for the external trump/hrx checks:
 3. run the new Auto-AVSR-compatible reprocess_worker_avsr.py for lip_avsr.npy
 4. extract Mimi latent, Auto-AVSR encoder/text, SmolLM2 hidden, speaker/timbre
 5. run the current best recon checkpoint with 3s audio prompt
-6. mux post-3s predicted audio back to the standardized video
+6. mux post-3.04s predicted audio back to the standardized video
 7. export face/lip_avsr visualization videos
 
 Run with the repo .venv, for example:
@@ -276,12 +276,12 @@ def run_recon(
 
 
 def recon_wav_start_frame(*, silent_input: bool) -> int:
-    return 0 if silent_input else PROMPT_FRAMES
+    return PROMPT_FRAMES
 
 
 def result_video_names(exp: str, *, silent_input: bool) -> tuple[str, str | None]:
     if silent_input:
-        return f"{exp}_pred_full.mp4", None
+        return f"{exp}_pred_post3s.mp4", None
     return f"{exp}_pred_prompt3s_post3s.mp4", f"{exp}_gt_mimi_post3s.mp4"
 
 
@@ -294,8 +294,7 @@ def mux_outputs(exp_dir: Path, exp: str, recon_dir: Path, std_mp4: Path, *, sile
         cmd = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         ]
-        if not silent_input:
-            cmd += ["-ss", "3.04"]
+        cmd += ["-ss", "3.04"]
         cmd += [
             "-i", str(std_mp4),
             "-i", str(recon_dir / wav_name),
