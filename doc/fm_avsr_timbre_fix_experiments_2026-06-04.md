@@ -657,3 +657,39 @@ E9/E10/E11. This closes the "switch earlier from a prefix-prompt checkpoint"
 branch for these short experiments. The clean prompt distribution consistently
 lands around `0.578`, while the high-corr E2 path relies on temporal prefix
 prompt content.
+
+### E14: No Prompt Cross-Attention With Mean/Std Stat Pool
+
+Hypothesis:
+
+E6 removed raw prompt cross-attention and only kept mean-pooled prompt
+conditioning, dropping to `0.5643`. Add the existing
+`audio_prompt_stat_pool_cond` path so the model receives fixed-size mean/std
+prompt statistics in the frame condition, still without temporal prompt
+cross-attention. This tests whether richer fixed-size timbre statistics can
+replace the sequence-level prompt content route.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_nopromptxattn_statpool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_nopromptxattn_statpool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.56441507` | `0.67150489` | `0.60568796` | `0.59944201` | `165.66 s` | stop |
+
+Conclusion:
+
+The mean/std stat-pool condition does not recover the no-prompt-cross-attn
+route; it is effectively tied with E6. A fixed-size prompt statistic derived
+inside the current model is not enough. The missing signal is not just mean/std
+speaker style; the high-corr model needs temporal prompt tokens.
