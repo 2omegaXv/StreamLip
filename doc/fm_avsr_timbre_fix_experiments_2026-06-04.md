@@ -582,3 +582,43 @@ historical-best score. It lands in the same band as E9/E10. This weakens the
 current architecture learns useful content from temporal prompt tokens, and a
 speaker-only route probably needs to be trained as a separate condition rather
 than obtained by short fine-tuning of the prompt-token model.
+
+### E12: Reversed Prefix Prompt Order
+
+Hypothesis:
+
+If the model mainly uses the prompt as an unordered acoustic/timbre reference,
+reversing the first 3.04 s prompt tokens should keep most validation corr while
+reducing direct prefix-copy behavior. If corr drops sharply, the model depends
+on prompt token time order and prompt content, not only on prompt distribution.
+
+Code/config:
+
+- `FMAVSRDataset(audio_prompt_ref_mode="self_prefix_reverse")`
+  - uses the same first `audio_prompt_frames` as the baseline;
+  - reverses the prompt token order before feeding the model.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_revprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_revprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.57178048` | `0.66417245` | `0.59970490` | `0.59282333` | `159.72 s` | stop |
+
+Conclusion:
+
+Reversing the prompt order drops validation corr below the same-parent and
+late-window prompt variants. This is strong evidence that the current model uses
+the temporal order of prompt tokens as meaningful content, not just speaker
+style statistics. Reversed prompt order is not a viable mitigation.

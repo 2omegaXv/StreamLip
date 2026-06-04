@@ -193,6 +193,36 @@ class FMAVSRDatasetTest(unittest.TestCase):
             self.assertEqual(item["audio_prompt"].shape, (4, 512))
             np.testing.assert_allclose(item["audio_prompt"], latent[76:80])
 
+    def test_dataset_can_build_audio_prompt_from_reversed_self_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            np.savez(
+                root / "latent_norm_stats.npz",
+                mean=np.zeros((512,), dtype=np.float32),
+                std=np.ones((512,), dtype=np.float32),
+            )
+            clip = root / "pretrain" / "spk" / "00001"
+            clip.mkdir(parents=True)
+            (clip / "avsr_text.txt").write_text("PROMPT\n")
+            np.save(clip / "avsr_enc.npy", np.ones((16, 768), dtype=np.float32))
+            latent = np.arange(8 * 512, dtype=np.float32).reshape(8, 512)
+            np.savez(clip / "latent.npz", latent=latent)
+            np.save(clip / "speaker_emb.npy", np.ones((256,), dtype=np.float32))
+            np.save(clip / "smollm2_h.npy", np.ones((1, 960), dtype=np.float16))
+            clip_list = root / "clips.txt"
+            clip_list.write_text("pretrain/spk/00001\n")
+
+            ds = FMAVSRDataset(
+                str(root),
+                clip_list=str(clip_list),
+                audio_prompt_frames=4,
+                audio_prompt_ref_mode="self_prefix_reverse",
+            )
+            item = ds[0]
+
+            self.assertEqual(item["audio_prompt"].shape, (4, 512))
+            np.testing.assert_allclose(item["audio_prompt"], latent[:4][::-1])
+
     def test_read_clip_text_can_use_text_json_words(self):
         with tempfile.TemporaryDirectory() as tmp:
             clip = Path(tmp)

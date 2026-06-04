@@ -296,6 +296,7 @@ class FMAVSRDataset(Dataset):
             "same_parent_next",
             "self_random_window",
             "self_late_window",
+            "self_prefix_reverse",
         }:
             raise ValueError(f"unknown audio_prompt_ref_mode: {self.audio_prompt_ref_mode}")
         self._same_parent_next = self._build_same_parent_next_refs(clips)
@@ -364,7 +365,10 @@ class FMAVSRDataset(Dataset):
             prompt_start = self._audio_prompt_start(prompt_lat)
             prompt_end = min(prompt_start + self.audio_prompt_frames, prompt_lat.shape[0])
             n_prompt = max(prompt_end - prompt_start, 0)
-            audio_prompt[:n_prompt] = prompt_lat[prompt_start:prompt_end]
+            prompt_window = prompt_lat[prompt_start:prompt_end]
+            if self.audio_prompt_ref_mode == "self_prefix_reverse":
+                prompt_window = prompt_window[::-1]
+            audio_prompt[:n_prompt] = prompt_window
         energy = (
             load_log_rms_energy(c, lat.shape[0]).astype("float32")
             if self.load_energy else None
