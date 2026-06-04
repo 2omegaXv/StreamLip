@@ -312,8 +312,9 @@ Combined 59,144 split:
 | 59k pooled prompt continuation | 5000 | 0.58143902 | 0.66799185 | 0.60200530 | resumed 50k base step4000, lr `5e-5` |
 | 59k residual from step5000 | 1000 | 0.58167589 | 0.66776208 | 0.60182909 | previous best full eval |
 | 59k residual + denoise loss | 1250 | 0.58173362 | 0.66768414 | 0.60181177 | `lambda_denoise=0.1`, `denoise_t=[0, 0.1]` |
-| 59k residual + denoise loss | 1500 | 0.58176819 | 0.66763995 | 0.60180507 | current best verified full eval |
+| 59k residual + denoise loss | 1500 | 0.58176819 | 0.66763995 | 0.60180507 | effectively saturated |
 | 59k residual + CTC top-k condition | 1500 | 0.58177180 | 0.66764077 | 0.60178911 | `ctc_condition_mode=topk`; effectively tied with denoise |
+| 59k residual + per-sample corr loss | 1500 | 0.58177344 | 0.66763517 | 0.60181215 | `lambda_sample_corr=0.2`; effectively tied with CTC/denoise |
 
 The 50k scale-up improved the best full eval from `0.57255184` to
 `0.58091919`. Residual timbre-stat continuation added only `+0.00013806`
@@ -322,9 +323,9 @@ meaningful path toward `0.6`.
 
 The 59k scale-up is directionally positive but still small. It improved the
 base full eval from `0.58013729` to `0.58143902`, and residual refinement on
-that base reached `0.58167589`. A short denoise-endpoint continuation moved the
-best full-val metric only to `0.58176819`, so it is still far below the target
-`0.6`.
+that base reached `0.58167589`. Short denoise, CTC top-k, and per-sample corr
+continuations all land around `0.58177`, so the current deterministic residual
+head is still far below the target `0.6`.
 
 The denoise continuation resumed
 `runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_residual_from5000_recon_textjson_wordts_v1/step_001000.pt`
@@ -404,6 +405,44 @@ is passed explicitly on the command line. Eval config loading now maps
 `val_clip_list` to `clip_list` when the user did not explicitly provide
 `--clip_list`, and this behavior is covered by unit tests.
 
+### Per-Sample Corr-Loss Continuation
+
+Run:
+`runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_residual_samplecorr02_from1000_recon_textjson_wordts_v1`
+
+Config:
+`configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_residual_samplecorr02_from1000_recon_textjson_wordts.yaml`
+
+This continuation adds `masked_sample_corr_loss`, which optimizes the mean
+per-clip Pearson correlation after the 38-frame audio prompt. The earlier
+`masked_corr_loss` was batch-global, while the reported validation metric is an
+average of per-clip correlations. This test checks whether matching the training
+auxiliary loss to the eval aggregation helps.
+
+Training:
+
+- resume: 59k residual step1000
+- residual base: 59k pooled prompt step5000
+- `lambda_sample_corr: 0.2`
+- `lr: 5e-5`
+- max extra steps: 500
+- small validation recon corr: `0.58424845` at step1250,
+  `0.58426899` at step1500
+
+Full val1000 eval at step1500:
+
+- metrics:
+  `eval_out/lipavsr_59144_timbre3s_audioprompt38_pool_residual_samplecorr02_step1500_val1000_metrics/metrics.json`
+- `mean_corr: 0.58177344`
+- `mean_mse: 0.66763517`
+- `mean_mae: 0.60181215`
+
+This is only `+0.00000164` over the CTC top-k step1500 full eval
+(`0.58177180`). Per-clip comparison is again split almost exactly evenly
+(`509` clips better, `491` worse), with p10/p90 deltas of about `-0.000392` and
+`+0.000385`. The loss is implemented and useful as a diagnostic, but this
+weight and continuation do not produce a meaningful move toward `0.6`.
+
 ### Prompt Calibration Diagnostics
 
 A one-off full-val diagnostic tested whether the first 38 prompt frames could be
@@ -464,13 +503,15 @@ calibration, and post-prompt timbre-stat matching all add almost nothing after
 residual training. Passing the frozen base reconstruction back in as a residual
 condition also fails to improve full eval. Adding CTC top-k posterior tokens as
 an extra per-frame condition is also effectively a tie, improving full-val corr
-by only `0.00000361`. Adding the remaining 9,144 ready
-lip-AVSR clips is the strongest positive move in the latest batch, but it only
-raises full eval to `0.58167589`, and a light denoise endpoint continuation only
-raises it further to `0.58176819`. The remaining gap to 0.6 is likely not just
-"missing speaker identity"; the deterministic MSE-style latent head is still
-averaging over speaker and spectral detail that is not recoverable from the
-current condition fusion.
+by only `0.00000361`. A per-sample corr loss aligned to the full-eval
+aggregation is also effectively tied, improving full-val corr by only
+`0.00000164` over CTC top-k. Adding the remaining 9,144 ready lip-AVSR clips is
+the strongest positive move in the latest batch, but it only raises full eval to
+`0.58167589`, and the best short continuations only raise it to about
+`0.58177`. The remaining gap to 0.6 is likely not just "missing speaker
+identity"; the deterministic MSE-style latent head is still averaging over
+speaker and spectral detail that is not recoverable from the current condition
+fusion.
 
 The current best prompt is same-clip and should be treated as an upper-bound
 style diagnostic. A production-style voice control path should next test
@@ -488,5 +529,8 @@ Code support for `timbre_cond` and `audio_prompt` was covered by unit tests:
 - `uv run python -m py_compile scripts/eval_fm_avsr.py scripts/train_fm_avsr.py`
 - `uv run python -m unittest tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_load_fm_head_state_can_expand_cond_projection tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_partial_load_keeps_old_fm_output_when_new_ctc_condition_is_zero tests.test_eval_fm_avsr.EvalFMAVSRTest.test_parse_args_loads_allow_partial_resume_from_config -v`
 - `uv run python -m unittest tests.test_eval_fm_avsr.EvalFMAVSRTest.test_parse_args_prefers_val_clip_list_from_train_config tests.test_eval_fm_avsr.EvalFMAVSRTest.test_parse_args_cli_clip_list_overrides_config_val_clip_list tests.test_eval_fm_avsr.EvalFMAVSRTest.test_parse_args_loads_allow_partial_resume_from_config -v`
+- `uv run python -m unittest tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_masked_sample_corr_loss_averages_per_clip_correlation tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_combine_training_losses_can_include_sample_corr_loss -v`
+- `uv run python -m unittest tests.test_eval_fm_avsr tests.test_fm_avsr_dataset -v`
+- `uv run python -m py_compile scripts/train_fm_avsr.py scripts/eval_fm_avsr.py`
 
 All individual training/eval runs in this note were kept under the 1-hour limit.

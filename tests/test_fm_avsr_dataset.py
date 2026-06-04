@@ -29,6 +29,7 @@ from scripts.train_fm_avsr import (
     compose_endpoint_prediction,
     masked_corr_loss,
     masked_mse_loss,
+    masked_sample_corr_loss,
     masked_timbre_stats_loss,
     parse_args,
     project_latent_to_pca_target,
@@ -317,6 +318,24 @@ class FMAVSRDatasetTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(loss))
         self.assertTrue(torch.isfinite(pred.grad).all())
 
+    def test_masked_sample_corr_loss_averages_per_clip_correlation(self):
+        import torch
+
+        pred = torch.tensor([
+            [[0.0], [1.0], [2.0]],
+            [[0.0], [1.0], [2.0]],
+        ])
+        target = torch.tensor([
+            [[0.0], [1.0], [2.0]],
+            [[0.0], [-1.0], [-2.0]],
+        ])
+        lengths = torch.tensor([3, 3])
+
+        loss = masked_sample_corr_loss(pred, target, lengths, start_frame=1)
+
+        # Per-clip correlations are +1 and -1, so mean corr is 0 and loss is 1.
+        self.assertAlmostEqual(loss.item(), 1.0, places=5)
+
     def test_masked_timbre_stats_loss_matches_valid_post_prompt_mean_and_std(self):
         import torch
 
@@ -384,6 +403,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             loss_denoise=torch.tensor(5.0),
             loss_energy=torch.tensor(7.0),
             loss_recon_corr=torch.tensor(11.0),
+            loss_sample_corr=torch.tensor(19.0),
             loss_recon_pca=torch.tensor(13.0),
             loss_timbre_stats=torch.tensor(17.0),
             loss_fm_weight=0.0,
@@ -392,6 +412,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             lambda_denoise=0.25,
             lambda_energy=0.0,
             lambda_recon_corr=0.0,
+            lambda_sample_corr=0.0,
             lambda_recon_pca=0.0,
             lambda_timbre_stats=0.0,
         )
@@ -408,6 +429,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             loss_denoise=torch.tensor(0.0),
             loss_energy=torch.tensor(0.0),
             loss_recon_corr=torch.tensor(3.0),
+            loss_sample_corr=torch.tensor(0.0),
             loss_recon_pca=torch.tensor(7.0),
             loss_timbre_stats=torch.tensor(0.0),
             loss_fm_weight=0.0,
@@ -416,6 +438,33 @@ class FMAVSRDatasetTest(unittest.TestCase):
             lambda_denoise=0.0,
             lambda_energy=0.0,
             lambda_recon_corr=0.5,
+            lambda_sample_corr=0.0,
+            lambda_recon_pca=0.0,
+            lambda_timbre_stats=0.0,
+        )
+
+        self.assertAlmostEqual(loss.item(), 3.5)
+
+    def test_combine_training_losses_can_include_sample_corr_loss(self):
+        import torch
+
+        loss = combine_training_losses(
+            loss_fm=torch.tensor(0.0),
+            loss_recon=torch.tensor(2.0),
+            loss_sample_recon=torch.tensor(0.0),
+            loss_denoise=torch.tensor(0.0),
+            loss_energy=torch.tensor(0.0),
+            loss_recon_corr=torch.tensor(0.0),
+            loss_sample_corr=torch.tensor(3.0),
+            loss_recon_pca=torch.tensor(0.0),
+            loss_timbre_stats=torch.tensor(0.0),
+            loss_fm_weight=0.0,
+            lambda_recon=1.0,
+            lambda_sample_recon=0.0,
+            lambda_denoise=0.0,
+            lambda_energy=0.0,
+            lambda_recon_corr=0.0,
+            lambda_sample_corr=0.5,
             lambda_recon_pca=0.0,
             lambda_timbre_stats=0.0,
         )
@@ -432,6 +481,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             loss_denoise=torch.tensor(0.0),
             loss_energy=torch.tensor(0.0),
             loss_recon_corr=torch.tensor(0.0),
+            loss_sample_corr=torch.tensor(0.0),
             loss_recon_pca=torch.tensor(3.0),
             loss_timbre_stats=torch.tensor(0.0),
             loss_fm_weight=0.0,
@@ -440,6 +490,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             lambda_denoise=0.0,
             lambda_energy=0.0,
             lambda_recon_corr=0.0,
+            lambda_sample_corr=0.0,
             lambda_recon_pca=0.25,
             lambda_timbre_stats=0.0,
         )
@@ -456,6 +507,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             loss_denoise=torch.tensor(0.0),
             loss_energy=torch.tensor(2.0),
             loss_recon_corr=torch.tensor(3.0),
+            loss_sample_corr=torch.tensor(0.0),
             loss_recon_pca=torch.tensor(5.0),
             loss_timbre_stats=torch.tensor(0.0),
             loss_fm_weight=0.0,
@@ -464,6 +516,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             lambda_denoise=0.0,
             lambda_energy=0.5,
             lambda_recon_corr=0.0,
+            lambda_sample_corr=0.0,
             lambda_recon_pca=0.0,
             lambda_timbre_stats=0.0,
         )
@@ -480,6 +533,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             loss_denoise=torch.tensor(0.0),
             loss_energy=torch.tensor(0.0),
             loss_recon_corr=torch.tensor(0.0),
+            loss_sample_corr=torch.tensor(0.0),
             loss_recon_pca=torch.tensor(0.0),
             loss_timbre_stats=torch.tensor(3.0),
             loss_fm_weight=0.0,
@@ -488,6 +542,7 @@ class FMAVSRDatasetTest(unittest.TestCase):
             lambda_denoise=0.0,
             lambda_energy=0.0,
             lambda_recon_corr=0.0,
+            lambda_sample_corr=0.0,
             lambda_recon_pca=0.0,
             lambda_timbre_stats=0.5,
         )
