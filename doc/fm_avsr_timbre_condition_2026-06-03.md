@@ -758,6 +758,11 @@ This is the best full-val corr so far, but the gain is only `+0.00006835`.
 It is useful as a weak signal that directly regularizing prompt consistency can
 help a little, but it does not materially change the plateau.
 
+Post-prompt listen samples were exported to
+`eval_out/listen_promptstats005_step1500_recon_post38_n20` with
+`--wav_start_frame 38`, so the first 3 seconds used for voice control are not
+included in the generated or GT wavs.
+
 ## Interpretation
 
 Manual timbre control is practical in this codebase. The mean/std prompt is a
