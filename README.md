@@ -45,6 +45,13 @@ The raw-video path expects these local assets to exist:
 /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed/latent_norm_stats.npz
 ```
 
+The default pipeline and GUI use the current timbre-fix recon checkpoint:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt
+```
+
 ## Raw Video Pipeline
 
 ### Video With Audio
@@ -133,6 +140,13 @@ Expected generated video:
 
 ```text
 eval_out/trump_silent_ref_demo_full/trump_silent_ref_demo_full_pred_post3s.mp4
+```
+
+The timbre-fix checkpoint was also verified on the same preprocessed Trump
+silent-reference example:
+
+```text
+eval_out/trump_silent_ref_demo_full_e2_lossstart38/trump_silent_ref_demo_full_e2_lossstart38_pred_post3s.mp4
 ```
 
 ## GUI

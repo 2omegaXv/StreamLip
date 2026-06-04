@@ -93,3 +93,130 @@ Early-stop rule:
 
 - stop if validation corr at 500 steps is below `0.5830`;
 - stop immediately on NaN, exploding loss, or severe train/val regression.
+
+Result:
+
+| Step | val_recon_corr | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | --- |
+| 1250 | `0.5646` | not used | under 5 min | early-stopped |
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_nopromptxattn_residual_samplecorr02_from1000_recon_textjson_wordts_v1
+```
+
+Conclusion:
+
+Fully hiding raw prompt tokens removes the prompt-copying route, but it also
+removes a condition that the current checkpoint depends on heavily. This is not
+a viable final direction because it loses about `0.020` validation corr against
+the current best.
+
+### E2: Keep Prompt Tokens, Move Reconstruction Loss After Prompt
+
+Hypothesis:
+
+The direct copying bug is encouraged because training reconstructs the same
+first 38 Mimi frames that are also given as `audio_prompt.npy`. The validation
+metric already skips the first 38 frames, but the main reconstruction loss still
+starts at frame 0 in the strongest run. Setting `loss_start_frame: 38` keeps the
+prompt tokens available for speaker/style control while removing the direct
+loss reward for copying the prompt region.
+
+Planned config:
+
+- resume from the current best prompt-stats checkpoint at step 1500;
+- keep raw prompt cross-attention enabled;
+- set `loss_start_frame: 38`;
+- keep `metric_start_frame: 38`;
+- train only 500 additional steps, max runtime under 1 hour;
+- early-stop if the 1750-step validation corr drops below `0.5830`.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1
+```
+
+Training-validation result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1750 | `0.58433689` | `0.64905658` | `0.59181344` | `0.60431403` | `184.35 s` |
+| 2000 | `0.58434393` | `0.64904572` | `0.59179956` | `0.61712486` | `353.11 s` |
+
+Checkpoint:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt
+```
+
+This beats the training-validation historical best `0.58431531` by
+`+0.00002862` on the same validation split. It also reduces the apparent
+train/val overfit gap: the previous best had `train_recon_corr = 0.75502914`,
+while E2 has `train_recon_corr = 0.61712486` at its best checkpoint.
+
+Metrics-only eval on 1000 clips with the same eval script:
+
+| Model | corr | mse | mae | metric_start_frame |
+| --- | ---: | ---: | ---: | ---: |
+| previous best step 1500 | `0.58184180` | `0.66763106` | `0.60181897` | `38` |
+| E2 loss_start_frame=38 step 2000 | `0.58186685` | `0.66760399` | `0.60178062` | `38` |
+
+Eval command:
+
+```text
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml \
+  --ckpt runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt \
+  --use_recon --metrics_only --n 1000 \
+  --output_dir eval_out/timbre_fix_e2_lossstart38_val1000 \
+  --metrics_json eval_out/timbre_fix_e2_lossstart38_val1000/metrics.json
+```
+
+Conclusion:
+
+E2 is the current best quantitative checkpoint. It does not remove the temporal
+audio-prompt condition, so it is not a full architectural fix for speaker-only
+timbre. It does remove the direct training reward for reconstructing the same
+first 3.04 seconds that are supplied as `audio_prompt.npy`, and it keeps
+validation correlation above the historical best. For listening exports, the
+first 3.04 seconds should still be cropped until a fixed-size speaker-only
+timbre condition or random-reference/dropout training is implemented.
+
+Trump silent-reference listening check:
+
+The E2 checkpoint was run on the existing preprocessed Trump silent-reference
+demo to avoid reintroducing face/AVSR preprocessing variability. The output
+keeps the same post-prompt export convention, so the first 3.04 seconds are
+cropped from the visible/listenable MP4.
+
+```text
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml \
+  --ckpt runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt \
+  --data_root eval_out/trump_silent_ref_demo_full/processed \
+  --clip_list eval_out/trump_silent_ref_demo_full/clip_list.txt \
+  --text_source lipavsr --text_alignment_mode uniform \
+  --output_dir eval_out/trump_silent_ref_demo_full_e2_lossstart38/recon_lipavsr_prompt3s \
+  --n 1 --use_recon --audio_prompt_name audio_prompt.npy \
+  --wav_start_frame 38 --metric_start_frame 38 \
+  --metrics_json eval_out/trump_silent_ref_demo_full_e2_lossstart38/recon_lipavsr_prompt3s/metrics.json
+```
+
+Artifacts:
+
+```text
+eval_out/trump_silent_ref_demo_full_e2_lossstart38/recon_lipavsr_prompt3s/0000_pred.wav
+eval_out/trump_silent_ref_demo_full_e2_lossstart38/trump_silent_ref_demo_full_e2_lossstart38_pred_post3s.mp4
+```
+
+The muxed MP4 duration is `23.52 s`, matching the existing full silent-ref
+demo after removing the first `3.04 s` prompt region.

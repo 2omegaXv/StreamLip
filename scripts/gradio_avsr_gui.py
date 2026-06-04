@@ -44,11 +44,11 @@ PIPELINE_SCRIPT = REPO_ROOT / "scripts/run_raw_video_avsr_recon_pipeline.py"
 
 DEFAULT_CONFIG = (
     "configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_"
-    "residual_samplecorr02_from1000_recon_textjson_wordts.yaml"
+    "residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml"
 )
 DEFAULT_CKPT = (
     "runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_"
-    "residual_samplecorr02_from1000_recon_textjson_wordts_v1/step_001500.pt"
+    "residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt"
 )
 
 # ---------------------------------------------------------------------------
