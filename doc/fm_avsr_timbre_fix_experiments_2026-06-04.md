@@ -511,3 +511,39 @@ copying because its prompt starts exactly where the metric/export starts. The
 cleaner same-clip reference direction is still useful diagnostically, but the
 current temporal prompt representation has not been fixed without sacrificing
 validation corr.
+
+### E10: Continue Same-Clip Late Prompt Fine-Tuning
+
+Hypothesis:
+
+E9 is cleaner than E7 but lower. Continue from E9 for one more 250-step
+interval with LR `1e-5` to test whether the cleaner late-window condition only
+needs more adaptation time.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from2250_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from2250_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2500 | `0.57830043` | `0.65645907` | `0.59535372` | `0.58822912` | `170.11 s` | stop |
+
+Conclusion:
+
+Continuing the cleaner late-window route barely changes validation corr
+(`+0.00024` over E9) and remains about `0.0060` below E2. This closes the short
+fine-tuning branch for now: cleaner temporal references reduce prompt leakage
+risk, but they do not preserve the historical-best corr when adapted from the
+current E2 checkpoint. A real fix likely needs a training run that uses
+randomized/late references from the start or a dedicated speaker-only embedding
+that is independent of utterance timing.
