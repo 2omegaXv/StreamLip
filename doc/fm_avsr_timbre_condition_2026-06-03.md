@@ -318,6 +318,7 @@ Combined 59,144 split:
 | 12k residual + Mimi/Mel timbre cond | 1500 | n/a | n/a | n/a | quick signal only; small val corr `0.58422178`, below platform |
 | 59k residual + audio prompt stat pool | 1500 | n/a | n/a | n/a | quick signal only; small val corr `0.58425596`, below platform |
 | 59k residual + sample endpoint loss | 1500 | n/a | n/a | n/a | quick signal only; small val recon corr `0.58396477`, sample corr `0.34727610` |
+| 59k residual + stronger sample endpoint loss | 1500 | n/a | n/a | n/a | quick signal only; `lambda_sample_recon=1.0`, sample corr `0.35019858` |
 
 The 50k scale-up improved the best full eval from `0.57255184` to
 `0.58091919`. Residual timbre-stat continuation added only `+0.00013806`
@@ -621,6 +622,23 @@ residual checkpoints. Eval now computes the residual base latent for all three
 decode paths, and the regression test
 `test_residual_base_latent_is_computed_for_sample_eval_path` covers the helper.
 
+I also tested a stronger sample endpoint weight:
+`configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_residual_samplerecon1_from1000_recon_textjson_wordts.yaml`
+
+Training was identical except `lambda_sample_recon: 1.0`. Results:
+
+| Step | Val recon corr | Val sample corr | Val sample MSE | Val sample MAE |
+| ---: | ---: | ---: | ---: | ---: |
+| 1250 | 0.58365268 | 0.33344784 | 1.38897067 | 0.92453282 |
+| 1500 | 0.58385701 | 0.35019858 | 1.28566961 | 0.88683681 |
+
+The stronger sample endpoint loss improves sample corr by only `+0.00292248`
+over `lambda_sample_recon=0.2` at step1500, while recon corr remains below the
+deterministic platform. This suggests that sample endpoint training is
+directionally relevant, but simply increasing its MSE weight is not enough.
+Future tests should change the sampling objective or NFE schedule rather than
+only increasing this loss weight.
+
 ### Prompt Calibration Diagnostics
 
 A one-off full-val diagnostic tested whether the first 38 prompt frames could be
@@ -689,7 +707,9 @@ existing small-val platform. Adding prompt-token mean/std as a zero-initialized
 in-model global condition was also only a platform tie on small validation.
 Adding a weak sample endpoint loss makes the sampling path trainable on the
 current residual platform, but sampled output remains much worse than
-deterministic recon and the recon probe drops slightly.
+deterministic recon and the recon probe drops slightly. Raising that sample
+endpoint weight from `0.2` to `1.0` gives only a tiny sample-corr gain, so the
+issue is not just loss weighting.
 Adding the remaining 9,144 ready lip-AVSR clips is the strongest positive move
 in the latest batch, but it only raises full eval to `0.58167589`, and the best
 short continuations only raise it to about `0.58177`. The remaining gap to 0.6
