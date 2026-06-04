@@ -172,6 +172,25 @@ class EvalFMAVSRTest(unittest.TestCase):
 
         self.assertTrue(args.no_audio_prompt_cross_attn)
 
+    def test_parse_args_loads_audio_prompt_cross_attn_pool_from_config(self):
+        old_argv = sys.argv
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+                f.write("audio_prompt_cross_attn_pool: true\n")
+                f.flush()
+                sys.argv = [
+                    "scripts/eval_fm_avsr.py",
+                    "--config",
+                    f.name,
+                    "--ckpt",
+                    "dummy.pt",
+                ]
+                args = eval_fm_avsr.parse_args()
+        finally:
+            sys.argv = old_argv
+
+        self.assertTrue(args.audio_prompt_cross_attn_pool)
+
     def test_parse_args_prefers_val_clip_list_from_train_config(self):
         old_argv = sys.argv
         try:

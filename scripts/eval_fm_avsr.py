@@ -59,6 +59,7 @@ class FMHeadAVSR(_FMBase):
         audio_prompt_stat_pool_cond=False,
         audio_prompt_learned_pool_cond=False,
         audio_prompt_cross_attn=True,
+        audio_prompt_cross_attn_pool=False,
         ctc_vocab_size=0,
         ctc_topk=0,
         ctc_token_emb_dim=0,
@@ -75,6 +76,7 @@ class FMHeadAVSR(_FMBase):
             audio_prompt_stat_pool_cond=audio_prompt_stat_pool_cond,
             audio_prompt_learned_pool_cond=audio_prompt_learned_pool_cond,
             audio_prompt_cross_attn=audio_prompt_cross_attn,
+            audio_prompt_cross_attn_pool=audio_prompt_cross_attn_pool,
             ctc_vocab_size=ctc_vocab_size,
             ctc_topk=ctc_topk,
             ctc_token_emb_dim=ctc_token_emb_dim,
@@ -179,6 +181,8 @@ def parse_args():
                    help="Also add zero-initialized learned-attention pooled audio prompt condition.")
     p.add_argument("--no_audio_prompt_cross_attn", action="store_true",
                    help="Do not expose sequence-level audio prompt tokens to DiT cross-attention.")
+    p.add_argument("--audio_prompt_cross_attn_pool", action="store_true",
+                   help="Expose only one mean-pooled audio prompt token to DiT cross-attention.")
     p.add_argument("--ctc_condition_mode",
                    choices=[
                        "none",
@@ -239,7 +243,7 @@ def parse_args():
                        "visual_feature_name", "timbre_condition_name", "timbre_condition_dim",
                        "audio_prompt_frames", "audio_prompt_name", "audio_prompt_dim", "audio_prompt_pool_cond",
                        "audio_prompt_stat_pool_cond", "audio_prompt_learned_pool_cond",
-                       "no_audio_prompt_cross_attn",
+                       "no_audio_prompt_cross_attn", "audio_prompt_cross_attn_pool",
                        "ctc_condition_mode", "auto_avsr_ckpt", "ctc_vocab_size",
                        "ctc_topk", "ctc_token_emb_dim", "energy_condition_mode",
                        "residual_base_ckpt", "allow_partial_resume",
@@ -427,6 +431,7 @@ def main():
         audio_prompt_stat_pool_cond=args.audio_prompt_stat_pool_cond,
         audio_prompt_learned_pool_cond=args.audio_prompt_learned_pool_cond,
         audio_prompt_cross_attn=not args.no_audio_prompt_cross_attn,
+        audio_prompt_cross_attn_pool=args.audio_prompt_cross_attn_pool,
         ctc_vocab_size=args.ctc_vocab_size,
         ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
         ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -468,6 +473,7 @@ def main():
             audio_prompt_stat_pool_cond=args.audio_prompt_stat_pool_cond,
             audio_prompt_learned_pool_cond=args.audio_prompt_learned_pool_cond,
             audio_prompt_cross_attn=not args.no_audio_prompt_cross_attn,
+            audio_prompt_cross_attn_pool=args.audio_prompt_cross_attn_pool,
             ctc_vocab_size=args.ctc_vocab_size,
             ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
             ctc_token_emb_dim=args.ctc_token_emb_dim,

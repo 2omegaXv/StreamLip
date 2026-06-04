@@ -220,3 +220,49 @@ eval_out/trump_silent_ref_demo_full_e2_lossstart38/trump_silent_ref_demo_full_e2
 
 The muxed MP4 duration is `23.52 s`, matching the existing full silent-ref
 demo after removing the first `3.04 s` prompt region.
+
+### E3: Pooled Prompt Token for Cross-Attention
+
+Hypothesis:
+
+E1 showed that removing audio-prompt cross-attention entirely loses too much
+correlation. E3 keeps a prompt cross-attention path but replaces the temporal
+`(38, 512)` prompt-token sequence with one mean-pooled prompt token. This
+reduces the sequence-level content-copying path while preserving a style-like
+reference token.
+
+Code/config:
+
+- `src/streaminlip/v2/fm_head.py`
+  - adds `audio_prompt_cross_attn_pool`;
+  - when enabled, DiT cross-attention sees only
+    `mean(audio_prompt_proj(audio_prompt), dim=time)` as one token.
+- `scripts/train_fm_avsr.py` and `scripts/eval_fm_avsr.py`
+  - add CLI/config support for `audio_prompt_cross_attn_pool`.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_poolxattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_poolxattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.56620605` | `0.66995936` | `0.60439114` | `0.57895392` | `182.76 s` | stop |
+
+Conclusion:
+
+This confirms the current high-corr checkpoint still depends on temporal
+audio-prompt cross-attention. Pooling the prompt token is conceptually cleaner
+for timbre control but causes a large validation drop (`-0.0181` versus E2).
+Therefore E3 is not a deployable final model. The final checkpoint for now
+remains E2, with first-3.04s export cropping and the documented limitation that
+the prompt representation is not yet a pure speaker embedding.

@@ -217,6 +217,7 @@ class FMHead(nn.Module):
         audio_prompt_stat_pool_cond: bool = False,
         audio_prompt_learned_pool_cond: bool = False,
         audio_prompt_cross_attn: bool = True,
+        audio_prompt_cross_attn_pool: bool = False,
         ctc_vocab_size: int = 0,
         ctc_topk: int = 0,
         ctc_token_emb_dim: int = 0,
@@ -231,6 +232,7 @@ class FMHead(nn.Module):
         self.audio_prompt_stat_pool_cond = audio_prompt_stat_pool_cond
         self.audio_prompt_learned_pool_cond = audio_prompt_learned_pool_cond
         self.audio_prompt_cross_attn = audio_prompt_cross_attn
+        self.audio_prompt_cross_attn_pool = audio_prompt_cross_attn_pool
         self.ctc_topk = ctc_topk
         self.ctc_token_emb_dim = ctc_token_emb_dim
         ctc_cond_dim = ctc_token_emb_dim + ctc_topk if ctc_topk > 0 else 0
@@ -376,6 +378,8 @@ class FMHead(nn.Module):
                 pooled = (prompt_tokens * weights).sum(dim=1)
                 cond = cond + self.audio_prompt_learned_pool_proj(pooled).unsqueeze(1)
             if self.audio_prompt_cross_attn:
+                if self.audio_prompt_cross_attn_pool:
+                    prompt_tokens = prompt_tokens.mean(dim=1, keepdim=True)
                 cond_tokens = (
                     prompt_tokens if cond_tokens is None
                     else torch.cat([cond_tokens, prompt_tokens], dim=1)

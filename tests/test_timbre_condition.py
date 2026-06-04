@@ -132,6 +132,25 @@ class TimbreConditionTest(unittest.TestCase):
         self.assertFalse(isinstance(built, tuple))
         self.assertEqual(tuple(built.shape), (2, 4, 512))
 
+    def test_audio_prompt_cross_attention_can_use_pooled_token_only(self):
+        fm = FMHeadAVSR(
+            n_layers=1,
+            use_cross_attn=True,
+            audio_prompt_dim=512,
+            audio_prompt_cross_attn_pool=True,
+        )
+        v = torch.zeros(2, 4, 768)
+        h = torch.zeros(2, 4, 960)
+        spk = torch.zeros(2, 256)
+        prompt = torch.randn(2, 3, 512)
+
+        cond, cond_tokens = fm._build_cond(v, h, spk, audio_prompt=prompt)
+
+        expected = fm.audio_prompt_proj(prompt).mean(dim=1, keepdim=True)
+        self.assertEqual(tuple(cond.shape), (2, 4, 512))
+        self.assertEqual(tuple(cond_tokens.shape), (2, 1, 512))
+        torch.testing.assert_close(cond_tokens, expected)
+
     def test_audio_prompt_stat_pool_condition_starts_as_noop(self):
         torch.manual_seed(0)
         mean_pool = FMHeadAVSR(
