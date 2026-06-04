@@ -176,30 +176,34 @@ mean_mse: 0.8064498901
 mean_mae: 0.6968652010
 ```
 
-Silent/ref smoke example:
+Full-length silent/ref demo assets:
+
+```text
+data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4
+data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4
+data/assets/trump_silent_ref_demo/trump_silent_ref_demo_full_pred_full.mp4
+```
+
+The silent input is `data/trump.mov` with the final 3 seconds removed and all
+audio stripped. The reference file is the final 3 seconds of the same source
+video, kept with audio for timbre/audio-prompt conditioning.
+
+Reproduce the generated full-length output:
 
 ```bash
-mkdir -p eval_out/readme_silent_ref_inputs
-ffmpeg -y -hide_banner -loglevel error \
-  -i data/trump.mov -t 8 -an -vf fps=25,scale=224:224 \
-  -c:v libx264 -preset veryfast -crf 18 \
-  eval_out/readme_silent_ref_inputs/trump_8s_silent.mp4
-ffmpeg -y -hide_banner -loglevel error \
-  -i data/trump.mov -t 3.5 -vn -ar 24000 -ac 1 \
-  eval_out/readme_silent_ref_inputs/trump_ref_3p5s.wav
 /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
   scripts/run_raw_video_avsr_recon_pipeline.py \
-  --input eval_out/readme_silent_ref_inputs/trump_8s_silent.mp4 \
-  --ref_audio eval_out/readme_silent_ref_inputs/trump_ref_3p5s.wav \
+  --input data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4 \
+  --ref_audio data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4 \
   --silent_input \
-  --exp trump_silent_ref_verify \
+  --exp trump_silent_ref_demo_full \
   --force
 ```
 
 Expected generated video:
 
 ```text
-eval_out/trump_silent_ref_verify/trump_silent_ref_verify_pred_full.mp4
+eval_out/trump_silent_ref_demo_full/trump_silent_ref_demo_full_pred_full.mp4
 ```
 
 ## Tests
