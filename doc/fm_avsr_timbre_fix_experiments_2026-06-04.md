@@ -693,3 +693,36 @@ The mean/std stat-pool condition does not recover the no-prompt-cross-attn
 route; it is effectively tied with E6. A fixed-size prompt statistic derived
 inside the current model is not enough. The missing signal is not just mean/std
 speaker style; the high-corr model needs temporal prompt tokens.
+
+### E15: Earlier No Prompt Cross-Attention With Stat Pool
+
+Hypothesis:
+
+E14 might be low because it switches from the already-specialized E2 checkpoint.
+Start from the earlier step-1000 checkpoint and train with no temporal prompt
+cross-attention plus mean/std stat-pool prompt conditioning. This tests whether
+fixed-size prompt statistics need earlier adaptation.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_nopromptxattn_statpool_promptstats005_residual_samplecorr02_lossstart38_from1000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_nopromptxattn_statpool_promptstats005_residual_samplecorr02_lossstart38_from1000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1250 | `0.56471062` | `0.67105854` | `0.60534329` | `0.59065282` | `193.76 s` | stop |
+
+Conclusion:
+
+Earlier adaptation does not help the no-prompt-cross-attn/stat-pool route. It
+stays in the same band as E6/E14. This rules out the current fixed-stat prompt
+pooling as a short-run substitute for temporal prompt tokens.
