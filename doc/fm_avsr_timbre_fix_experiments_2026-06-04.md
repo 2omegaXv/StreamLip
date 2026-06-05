@@ -761,3 +761,38 @@ Increasing the prompt timbre-stat loss to `0.20` keeps the model near E2 but
 drops below both E2 (`0.58434393`) and the historical best (`0.58431531`). It is
 not an acceptable final checkpoint under the current success gate. A milder
 weight is worth testing because this run did not collapse and remains close.
+
+### E17: Milder Prompt Timbre-Stats Loss
+
+Hypothesis:
+
+E16 may have over-regularized the reconstruction objective. Reduce
+`lambda_prompt_timbre_stats` from `0.20` to `0.10` while keeping the E2 temporal
+prompt architecture, to test whether a milder speaker-stat constraint can keep
+the historical-best corr while improving timbre consistency.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats010_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats010_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58430445` | `0.64917718` | `0.59188184` | `0.60478997` | `184.09 s` | stop |
+
+Conclusion:
+
+The milder prompt-stat loss almost ties the historical best but still lands
+below it by about `1.1e-5` and below E2 by about `3.9e-5`. More importantly, it
+keeps the same temporal prompt-token cross-attention path, so it does not
+structurally remove the content-copying risk. Stronger/milder prompt-stat losses
+are not sufficient as the main fix.
