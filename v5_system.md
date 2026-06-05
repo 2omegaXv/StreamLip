@@ -197,8 +197,10 @@ python scripts/decode_v5.py \
   --smollm2_path pretrained/olmo-1b-lrs3-ep2 \
   --cross_attn_every_n 4 \
   --split test --n_clips 200 \
-  --offline --num_beams 10
+  --offline --num_beams 3
 ```
+
+**最优 beam 宽度：3**（见 §7.3 beam sweep 实验）
 
 ### 6.2 EOS 自然停止
 
@@ -232,6 +234,26 @@ python scripts/eval_compare.py \
 - V5 step=7000: 22.3% WER
 
 > 注：beam=10 结果偏低（样本少 + beam 宽度小使两者都偏乐观），200 clips beam=40 更可靠。
+
+### 7.3 Beam Sweep 实验（长句子子集，≥10词 / ≥4.0s，126 clips）
+
+长句子是 V5 相对优势最大的条件（LM 语境积累越多纠错能力越强），在此子集上系统测试 beam 宽度的影响：
+
+| beam | AVSR WER | V5 WER | 差距 | V5胜率 |
+|------|----------|--------|------|--------|
+| 1 (greedy) | 11.1% | 21.9% | 10.8pp | 6.3% (8/126) |
+| 2 | 10.3% | 16.2% | 5.9pp | 9.5% (12/126) |
+| **3** | **10.2%** | **15.4%** | **5.2pp ← 最小** | 9.5% (12/126) |
+| 4 | 10.3% | 15.6% | 5.3pp | 10.3% (13/126) |
+| 40 | 9.9% | 15.9% | 6.0pp | 10.3% (13/126) |
+
+**结论**：
+- **V5 最优 beam = 3**，WER 15.4%，差距缩至 5.2pp
+- beam 1→2 跳变最大（-5.7pp），第一个候选对比即可过滤大量 greedy 错误
+- beam ≥ 4 后不再有收益，甚至微弱回升——beam 过宽时 LM 选出"语言流畅但视觉不对齐"的候选，引入噪声
+- AVSR 对 beam 几乎不敏感（11.1%→9.9%），说明其特征质量远优于 V5
+
+**实验脚本**：`CLAUDECODE/tasks/v5_vs_avsr_analysis/eval_long_sentences.py`
 
 ### 7.3 典型样例（step=14500，beam=40）
 
@@ -302,4 +324,4 @@ Auto-AVSR 是成熟的 VSR 系统（WER ~13%），但架构有固有局限：
 
 ---
 
-*2026.06.04.22*
+*2026.06.04.22 / beam sweep 补充 2026.06.04*
