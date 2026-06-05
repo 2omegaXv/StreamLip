@@ -834,3 +834,50 @@ while train corr remains much higher. This is a useful negative result: the
 current architecture does not merely need a better pooled speaker vector; it
 uses prompt-token sequence information for validation reconstruction quality.
 The clean no-prompt-token route is still far below the success gate.
+
+### E19: Shuffled Prefix Prompt Tokens
+
+Hypothesis:
+
+If the model only needs an unordered set of speaker/style tokens, shuffling the
+first-38-frame prompt tokens during training should preserve much of the corr
+while weakening direct temporal content copying. If corr drops sharply, prompt
+token order and local temporal content are part of the current reconstruction
+signal.
+
+Code change:
+
+- add `audio_prompt_ref_mode: self_prefix_shuffle`;
+- training dataset still uses the clip prefix tokens, but applies a fresh random
+  permutation before returning `audio_prompt`;
+- the same prompt-token cross-attention architecture is kept, so this isolates
+  the effect of temporal token order from the effect of removing prompt tokens
+  entirely.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_shuffleprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_shuffleprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.57204162` | `0.66379864` | `0.59943147` | `0.60054946` | `173.81 s` | stop |
+
+Conclusion:
+
+Shuffling prompt-token order recovers more corr than removing prompt-token
+cross-attention entirely (`0.5720` vs. `0.5637`) but is still far below E2 and
+the historical best. This confirms the high-corr route is not just a speaker
+token set; ordered/local audio-prompt content contributes substantially. A
+speaker-only fix must either train a stronger dedicated timbre encoder from a
+larger adaptation run or keep the temporal prompt route and mask/crop the copied
+prefix at inference, accepting the current limitation.

@@ -143,6 +143,7 @@ def parse_args():
                        "self_random_window",
                        "self_late_window",
                        "self_prefix_reverse",
+                       "self_prefix_shuffle",
                    ],
                    default="self_prefix",
                    help="Source clip for training audio prompt construction.")
