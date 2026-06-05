@@ -12,7 +12,8 @@ reconstruction system.
   assets.
 - `Poster Template.pptx`: copied source template used for slide size and
   poster format.
-- `assets/`: Trump demo frames, waveforms, and reused report figures.
+- `assets/`: Trump demo frames, waveforms, reused report figures, and
+  GPT Image 2.0 generated concept visuals.
 
 ## Rebuild
 
@@ -38,4 +39,12 @@ It includes the phrase:
 
 ```text
 OUR COUNTRY IS WINNING ... WE'RE WINNING SO MUCH ... WE WINNING TOO MUCH ...
+```
+
+The three generated concept images are used as visual companions for:
+
+```text
+generated_central_hero.png      lip/video cues to latent speech
+generated_residual_method.png   residual Mimi-latent reconstruction
+generated_silent_demo_strip.png silent video plus reference to voiced output
 ```

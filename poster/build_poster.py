@@ -244,9 +244,18 @@ def build():
         ],
         col1 + 0.35,
         top + 1.0,
-        col_w - 0.7,
+        col_w - 3.9,
         3.6,
         17,
+    )
+    add_captioned_image(
+        slide,
+        ASSET_DIR / "generated_central_hero.png",
+        "GPT-generated concept visual: lip cues -> latent speech",
+        col1 + col_w - 3.05,
+        top + 0.98,
+        2.55,
+        3.83,
     )
     add_metric(slide, "GT text corr", "0.5818", "val1000 final", col1 + 0.35, top + 5.35, 2.9, GREEN)
     add_metric(slide, "AVSR text corr", "0.5783", "drop only 0.0035", col1 + 3.45, top + 5.35, 3.15, TEAL)
@@ -307,10 +316,19 @@ def build():
     )
 
     add_section(slide, "4. Mathematical form", col2, top + 11.55, col_w, 8.4)
-    add_text(slide, "C = {visual, text, speaker, audio_prompt, timbre}", col2 + 0.42, top + 12.52, col_w - 0.84, 0.45, 18, True, TEAL)
-    add_text(slide, "y_base = f_base(C)", col2 + 0.42, top + 13.25, col_w - 0.84, 0.42, 19, False, SLATE)
-    add_text(slide, "delta = f_residual(C)", col2 + 0.42, top + 13.85, col_w - 0.84, 0.42, 19, False, SLATE)
-    add_text(slide, "y_hat = y_base + delta", col2 + 0.42, top + 14.47, col_w - 0.84, 0.48, 21, True, GREEN)
+    add_text(slide, "C = {visual, text,\nspeaker, audio_prompt,\ntimbre}", col2 + 0.42, top + 12.42, 4.35, 1.05, 16, True, TEAL)
+    add_text(slide, "y_base = f_base(C)", col2 + 0.42, top + 13.65, 4.35, 0.42, 18, False, SLATE)
+    add_text(slide, "delta = f_residual(C)", col2 + 0.42, top + 14.22, 4.35, 0.42, 18, False, SLATE)
+    add_text(slide, "y_hat = y_base + delta", col2 + 0.42, top + 14.82, 4.35, 0.48, 19, True, GREEN)
+    add_captioned_image(
+        slide,
+        ASSET_DIR / "generated_residual_method.png",
+        "GPT-generated residual recon schematic",
+        col2 + 5.1,
+        top + 12.45,
+        col_w - 5.55,
+        2.55,
+    )
     add_text(
         slide,
         "Current inference uses x_tilde = 0 and tau = 1. There is no iterative denoise loop; this is a deterministic one-step residual reconstruction of the target Mimi latent.",
@@ -481,6 +499,15 @@ def build():
     )
 
     add_section(slide, "9. End-to-end artifacts", col1, top + 20.1, col_w, 8.2)
+    add_captioned_image(
+        slide,
+        ASSET_DIR / "generated_silent_demo_strip.png",
+        "GPT-generated silent-video restoration overview",
+        col1 + 0.35,
+        top + 21.0,
+        col_w - 0.7,
+        2.65,
+    )
     add_bullets(
         slide,
         [
@@ -490,16 +517,16 @@ def build():
             "poster/build.sh rebuilds this poster into PPTX, PDF, and PNG preview.",
         ],
         col1 + 0.35,
-        top + 21.05,
+        top + 24.25,
         col_w - 0.7,
-        4.7,
-        13,
+        2.25,
+        11,
     )
     add_text(
         slide,
         "Submission-ready example: silent MP4 + 3 s reference -> voiced MP4. The Trump demo is self-contained and reproducible from checked-in assets.",
         col1 + 0.38,
-        top + 26.2,
+        top + 27.45,
         col_w - 0.76,
         1.0,
         13,
