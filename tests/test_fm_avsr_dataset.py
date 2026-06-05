@@ -20,6 +20,7 @@ from streaminlip.fm_avsr_dataset import (
 )
 from scripts.train_fm_avsr import (
     aggregate_sample_metrics,
+    apply_audio_prompt_dropout,
     combine_training_losses,
     crop_batch_to_latent_window,
     energy_extra_dim,
@@ -547,6 +548,17 @@ class FMAVSRDatasetTest(unittest.TestCase):
         # [2, 4]. Means differ by 1, stds match, and padded frame 3 is ignored.
         self.assertAlmostEqual(loss.item(), 1.0)
 
+    def test_apply_audio_prompt_dropout_can_zero_prompt_tokens(self):
+        import torch
+
+        prompt = torch.ones(2, 3, 4)
+
+        dropped = apply_audio_prompt_dropout(prompt, prob=1.0)
+        kept = apply_audio_prompt_dropout(prompt, prob=0.0)
+
+        self.assertTrue(torch.equal(dropped, torch.zeros_like(prompt)))
+        self.assertTrue(torch.equal(kept, prompt))
+
     def test_project_latent_to_pca_target_can_disable_projection(self):
         import torch
 
@@ -1017,6 +1029,24 @@ class FMAVSRDatasetTest(unittest.TestCase):
                 args = parse_args()
 
             self.assertEqual(args.audio_prompt_cross_attn_pool_tokens, 4)
+        finally:
+            sys.argv = old_argv
+
+    def test_parse_args_loads_audio_prompt_dropout_prob_from_config(self):
+        old_argv = sys.argv
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+                f.write("audio_prompt_dropout_prob: 0.25\n")
+                f.flush()
+                sys.argv = [
+                    "scripts/train_fm_avsr.py",
+                    "--config",
+                    f.name,
+                ]
+
+                args = parse_args()
+
+            self.assertEqual(args.audio_prompt_dropout_prob, 0.25)
         finally:
             sys.argv = old_argv
 

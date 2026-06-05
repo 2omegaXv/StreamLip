@@ -174,6 +174,8 @@ def parse_args():
                    help="Expose only one mean-pooled audio prompt token to DiT cross-attention.")
     p.add_argument("--audio_prompt_cross_attn_pool_tokens", type=int, default=0,
                    help="Expose N segment-pooled audio prompt tokens to DiT cross-attention; 0 keeps the existing behavior.")
+    p.add_argument("--audio_prompt_dropout_prob", type=float, default=0.0,
+                   help="Randomly zero training audio prompt tokens with this probability; validation is unchanged.")
     p.add_argument("--ctc_condition_mode",
                    choices=[
                        "none",
@@ -499,6 +501,25 @@ def project_latent_to_pca_target(
     centered = lat - mu
     coeff = torch.matmul(centered, comp.transpose(0, 1))
     return mu + torch.matmul(coeff, comp)
+
+
+def apply_audio_prompt_dropout(
+    audio_prompt: torch.Tensor | None,
+    prob: float,
+) -> torch.Tensor | None:
+    if audio_prompt is None:
+        return None
+    prob = float(prob)
+    if prob <= 0.0:
+        return audio_prompt
+    if prob >= 1.0:
+        return torch.zeros_like(audio_prompt)
+    keep = torch.rand(
+        audio_prompt.shape[:2],
+        device=audio_prompt.device,
+        dtype=torch.float32,
+    ) >= prob
+    return audio_prompt * keep.unsqueeze(-1).to(dtype=audio_prompt.dtype)
 
 
 def load_fm_head_state(
@@ -1266,6 +1287,10 @@ def main():
                     text_alignment_mode=args.text_alignment_mode,
                     ctc_condition_mode=args.ctc_condition_mode,
                     energy_condition_mode=args.energy_condition_mode,
+                )
+                audio_prompt = apply_audio_prompt_dropout(
+                    audio_prompt,
+                    args.audio_prompt_dropout_prob,
                 )
 
                 # FM loss

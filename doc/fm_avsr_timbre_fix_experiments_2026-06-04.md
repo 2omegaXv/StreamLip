@@ -993,6 +993,57 @@ that correlates very strongly with the shifted prompt and weakly with the target
 prefix. E21 is therefore a metric-preserving regularization candidate, but not a
 solution to the prompt-copy bug.
 
+### E22: Train-Time Audio Prompt Token Dropout
+
+Hypothesis:
+
+Instead of permuting the prompt, randomly zero 50% of audio prompt tokens during
+continued training. Validation and inference still receive the full ordered
+prefix prompt. If the model becomes less reliant on exact prompt content, the
+copy-risk diagnostic should reduce `prefix_prompt_corr` while preserving the
+post-prefix validation corr.
+
+Implementation:
+
+- add `audio_prompt_dropout_prob` to `scripts/train_fm_avsr.py`;
+- dropout is applied only after training-batch `prepare_conditions`;
+- validation remains unchanged.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_promptdrop50_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_promptdrop50_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58432217` | `0.64908975` | `0.59185386` | `0.59465802` | `188.58 s` | keep as diagnostic only |
+
+Copy-risk diagnostic (`audio_prompt_condition_shift=1`, `metric_start_frame=0`,
+`n=200`):
+
+| Model | mean_corr vs target | prefix_target_corr | prefix_prompt_corr |
+| --- | ---: | ---: | ---: |
+| E2 step 2000 | `0.3059714477` | `0.0382390886` | `0.9584999783` |
+| E21 step 2250 | `0.3059706628` | `0.0382069377` | `0.9584930963` |
+| E22 step 2250 | `0.3063568674` | `0.0385381637` | `0.9584760909` |
+
+Conclusion:
+
+Prompt-token dropout preserves the post-prefix validation metric above the
+historical best, but it does not meaningfully reduce prefix copying. The
+generated prefix still follows the shifted audio prompt with corr around
+`0.9585`. Dropout at this level is therefore not a real fix for the timbre
+copying issue.
+
 ### E22: Audio-Prompt-Only Shift Diagnostic
 
 Hypothesis:
@@ -1019,15 +1070,17 @@ scripts/eval_fm_avsr.py --config configs/fm_avsr_lipavsr_59144_timbre3s_trainshu
 
 Result:
 
-| Run | normal prefix val corr | shifted-prompt mean_corr | drop |
-| --- | ---: | ---: | ---: |
-| E2 temporal prompt | `0.58434393` | `0.50780876` | `0.07653517` |
-| E21 train-shuffle / val-prefix | `0.58433182` | `0.50783524` | `0.07649658` |
+| Run | normal prefix val corr | shifted-prompt mean_corr | drop | prefix-target corr | prefix-prompt corr |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| E2 temporal prompt | `0.58434393` | `0.50780876` | `0.07653517` | `0.03633958` | `0.95815594` |
+| E21 train-shuffle / val-prefix | `0.58433182` | `0.50783524` | `0.07649658` | `0.03629471` | `0.95814852` |
 
 Conclusion:
 
 E21 does not materially reduce dependence on the audio prompt. The shifted-prompt
 drop is essentially the same as E2; the difference is only about `2.6e-5` in
-mean corr. E21 is a metric-preserving augmentation, but not a verified fix for
-prompt copying or speaker-content leakage. The current success criteria are
-therefore still unmet.
+mean corr. More directly, after shifting only the prompt, the generated prefix
+correlates with the shifted prompt at about `0.958` and with the true target
+prefix at only about `0.036`, for both E2 and E21. E21 is a metric-preserving
+augmentation, but not a verified fix for prompt copying or speaker-content
+leakage. The current success criteria are therefore still unmet.
