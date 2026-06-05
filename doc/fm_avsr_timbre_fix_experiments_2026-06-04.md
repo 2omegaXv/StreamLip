@@ -796,3 +796,41 @@ below it by about `1.1e-5` and below E2 by about `3.9e-5`. More importantly, it
 keeps the same temporal prompt-token cross-attention path, so it does not
 structurally remove the content-copying risk. Stronger/milder prompt-stat losses
 are not sufficient as the main fix.
+
+### E18: No Prompt Cross-Attention With Learned Prompt Pool
+
+Hypothesis:
+
+Mean/std prompt pooling may be too weak, but the raw temporal prompt-token path
+is the suspected content-copying route. Keep the prompt available only through
+`audio_prompt_pool_cond` and `audio_prompt_learned_pool_cond`, and disable raw
+prompt-token cross-attention with `no_audio_prompt_cross_attn: true`. This tests
+whether a learned fixed-vector speaker summary can replace sequence prompt
+tokens without losing corr.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_nopromptxattn_learnedpool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_nopromptxattn_learnedpool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.56370605` | `0.67225298` | `0.60614244` | `0.58976477` | `190.26 s` | stop |
+
+Conclusion:
+
+The learned fixed-vector prompt summary does not recover the temporal
+prompt-token route. Validation corr drops into the same band as E6/E14/E15,
+while train corr remains much higher. This is a useful negative result: the
+current architecture does not merely need a better pooled speaker vector; it
+uses prompt-token sequence information for validation reconstruction quality.
+The clean no-prompt-token route is still far below the success gate.
