@@ -4,11 +4,14 @@ This script is intentionally small and explicit. It reproduces the raw-video
 flow used for the external trump/hrx checks:
 
 1. standardize input video to 224x224, 25 fps, 24 kHz mono audio
+   - for silent video with --ref_audio, prepend a black 3.04s prompt segment
+     carrying the first 3.04s of reference audio
 2. run the existing face/audio preprocessing for face.npz, audio.wav, lip.npy
 3. run the new Auto-AVSR-compatible reprocess_worker_avsr.py for lip_avsr.npy
 4. extract Mimi latent, Auto-AVSR encoder/text, SmolLM2 hidden, speaker/timbre
 5. run the current best recon checkpoint with 3s audio prompt
-6. mux post-3.04s predicted audio back to the standardized video
+6. mux post-3.04s predicted audio back to the standardized video, cropping the
+   prompt segment away
 7. export face/lip_avsr visualization videos
 
 Run with the repo .venv, for example:
@@ -44,6 +47,7 @@ PROMPT_FRAMES = 38
 LATENT_DIM = 512
 VIDEO_FPS = 25.0
 LATENT_HZ = 12.5
+PROMPT_SECONDS = PROMPT_FRAMES / LATENT_HZ
 
 
 def run(cmd: list[str], *, cwd: Path = REPO_ROOT) -> None:
@@ -86,6 +90,62 @@ def add_silent_audio(video_mp4: Path, out_mp4: Path) -> None:
         "-c:v", "copy", "-c:a", "aac", "-shortest",
         str(out_mp4),
     ])
+
+
+def should_concat_ref_prompt_prefix(*, silent_input: bool, has_ref_audio: bool) -> bool:
+    return bool(silent_input and has_ref_audio)
+
+
+def make_black_ref_prompt_prefix(ref_audio: Path, out_mp4: Path, size: int) -> None:
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-t", f"{PROMPT_SECONDS:.6f}",
+        "-i", f"color=c=black:s={size}x{size}:r=25",
+        "-i", str(ref_audio),
+        "-filter_complex",
+        (
+            f"[1:a]atrim=0:{PROMPT_SECONDS:.6f},asetpts=PTS-STARTPTS,"
+            "aresample=24000,aformat=channel_layouts=mono,"
+            f"apad=whole_dur={PROMPT_SECONDS:.6f}[a]"
+        ),
+        "-map", "0:v:0", "-map", "[a]",
+        "-t", f"{PROMPT_SECONDS:.6f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        str(out_mp4),
+    ])
+
+
+def concat_prompt_prefix_video(prompt_mp4: Path, body_mp4: Path, out_mp4: Path) -> None:
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+    run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(prompt_mp4),
+        "-i", str(body_mp4),
+        "-filter_complex",
+        (
+            "[0:v]setsar=1,format=yuv420p[v0];"
+            "[1:v]setsar=1,format=yuv420p[v1];"
+            "[0:a]aresample=24000,aformat=channel_layouts=mono[a0];"
+            "[1:a]aresample=24000,aformat=channel_layouts=mono[a1];"
+            "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]"
+        ),
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        str(out_mp4),
+    ])
+
+
+def build_silent_ref_prompt_video(body_silent_mp4: Path, ref_audio: Path, out_mp4: Path, size: int) -> None:
+    prompt_mp4 = out_mp4.with_name(out_mp4.stem + "_black_ref_prompt3s.mp4")
+    body_audio_mp4 = out_mp4.with_name(out_mp4.stem + "_body_silent_audio.mp4")
+    make_black_ref_prompt_prefix(ref_audio, prompt_mp4, size)
+    add_silent_audio(body_silent_mp4, body_audio_mp4)
+    concat_prompt_prefix_video(prompt_mp4, body_audio_mp4, out_mp4)
 
 
 def run_face_audio_preprocess(std_mp4: Path, clip_dir: Path, out_dir: Path, fa_device: str) -> None:
@@ -411,19 +471,24 @@ def main() -> None:
     clip_list.write_text(f"custom/{exp}/00001\n")
 
     standardize_video(input_video, std_mp4, args.size, silent_input=args.silent_input)
-    if args.silent_input:
+    concat_ref_prompt = should_concat_ref_prompt_prefix(
+        silent_input=args.silent_input,
+        has_ref_audio=ref_audio is not None,
+    )
+    if concat_ref_prompt:
+        ref_prompt_mp4 = exp_dir / f"{exp}_224_25fps_refprompt_concat.mp4"
+        build_silent_ref_prompt_video(std_mp4, ref_audio, ref_prompt_mp4, args.size)
+        std_mp4 = ref_prompt_mp4
+        preprocess_mp4 = ref_prompt_mp4
+    elif args.silent_input:
         preprocess_mp4 = exp_dir / f"{exp}_224_25fps_silent_audio_for_preprocess.mp4"
         add_silent_audio(std_mp4, preprocess_mp4)
     run_face_audio_preprocess(preprocess_mp4, clip_dir, exp_dir, args.fa_device)
     run_avsr_lip_reprocess(std_mp4, clip_dir, exp_dir, args.fa_device, Path(args.avsr_worker))
     ref_latent = None
-    if args.silent_input:
+    if args.silent_input and not concat_ref_prompt:
         n_video_frames = int(np.load(str(clip_dir / "lip_avsr.npy"), mmap_mode="r").shape[0])
         write_dummy_target_latent(clip_dir, n_video_frames)
-        if ref_audio is not None:
-            ref_wav = exp_dir / "ref_audio_24k_mono.wav"
-            standardize_ref_audio(ref_audio, ref_wav)
-            ref_latent = encode_audio_latent(ref_wav, Path(args.mimi_path))
     else:
         extract_mimi_latent(clip_dir, Path(args.mimi_path))
     extract_avsr_and_text(processed_root, clip_list, Path(args.auto_avsr_ckpt), Path(args.smollm2_path))

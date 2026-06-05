@@ -100,8 +100,13 @@ from the exported listening videos.
 
 ### Silent Reference Demo
 
-Use the checked-in silent/reference example. It is the only
-documented silent-mode demo for this branch.
+Silent mode now uses the same prompt layout as training. When `--ref_audio` is
+provided, the pipeline builds a temporary input video with a black 3.04-second
+prefix, places the first 3.04 seconds of the reference audio under that prefix,
+then appends the silent target video with silent audio. The model therefore sees
+the reference as the same-clip first-3-second audio prompt. The exported result
+is cropped after the prompt prefix, so the final video keeps the target silent
+video duration.
 
 ```text
 data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4
@@ -110,21 +115,19 @@ data/assets/trump_silent_ref_demo/trump_silent_ref_demo_full_pred_post3s.mp4
 ```
 
 The silent input is `data/trump.mov` with the final 3 seconds removed and all
-audio stripped. The reference file is the final 3 seconds of the same source
-video, kept with audio for timbre/audio-prompt conditioning.
+audio stripped. The reference file can be an audio file or a video file with
+audio. For best timbre control, use an unmasked segment from the same source
+video as `--ref_audio`; its first 3.04 seconds should contain valid speech.
 
-Recommended usage: if the original audio is only partially masked, use an
-unmasked segment from the same video as `--ref_audio`. The first 3.04 seconds of
-the reference must contain valid speech/audio, because the current model uses
-only those first 38 Mimi frames as the audio prompt and timbre condition. This
-lets the pipeline recover the missing silent video content with the same
-speaker/timbre style instead of requiring a separate speaker reference.
+If `--silent_input` is used without `--ref_audio`, the pipeline keeps the video
+silent for preprocessing and uses the default zero audio prompt and zero timbre
+condition.
 
-Current hack / TODO: the model can copy the reference prompt audio into the
-first generated seconds. Until this is fixed in the model, silent-mode exports
-drop the first 3.04 seconds and produce a post-prompt listening video.
+Current hack / TODO: the model can copy the prompt audio into the first
+generated seconds. The black-prefix concat keeps this copy-prone region outside
+the target video, and silent-mode exports crop it away after inference.
 
-Reproduce the generated post-3.04s output:
+Reproduce the generated output:
 
 ```bash
 /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \

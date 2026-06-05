@@ -5,6 +5,7 @@ import numpy as np
 from scripts.run_raw_video_avsr_recon_pipeline import (
     build_audio_prompt_condition,
     build_timbre_condition_for_pipeline,
+    should_concat_ref_prompt_prefix,
     recon_wav_start_frame,
     result_video_names,
 )
@@ -45,6 +46,11 @@ class RawVideoPipelineTest(unittest.TestCase):
         self.assertEqual(pred_name, "demo_pred_prompt3s_post3s.mp4")
         self.assertEqual(gt_name, "demo_gt_mimi_post3s.mp4")
         self.assertEqual(recon_wav_start_frame(silent_input=False), 38)
+
+    def test_silent_ref_mode_uses_black_video_ref_audio_prefix(self):
+        self.assertTrue(should_concat_ref_prompt_prefix(silent_input=True, has_ref_audio=True))
+        self.assertFalse(should_concat_ref_prompt_prefix(silent_input=True, has_ref_audio=False))
+        self.assertFalse(should_concat_ref_prompt_prefix(silent_input=False, has_ref_audio=True))
 
 
 if __name__ == "__main__":
