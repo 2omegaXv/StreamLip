@@ -171,10 +171,12 @@
 \setlength{\abovecaptionskip}{\@neuripsabovecaptionskip}
 \setlength{\belowcaptionskip}{\@neuripsbelowcaptionskip}
 
-% swap above/belowcaptionskip lengths for tables
+% Keep the same caption spacing for tables and figures. The original NeurIPS
+% style swaps the lengths because it expects table captions above tables; this
+% report places table captions below the tabular content.
 \renewenvironment{table}
-  {\setlength{\abovecaptionskip}{\@neuripsbelowcaptionskip}%
-   \setlength{\belowcaptionskip}{\@neuripsabovecaptionskip}%
+  {\setlength{\abovecaptionskip}{\@neuripsabovecaptionskip}%
+   \setlength{\belowcaptionskip}{\@neuripsbelowcaptionskip}%
    \@float{table}}
   {\end@float}
 
@@ -307,7 +309,7 @@
 {%
   % \vskip 0.075in%
   \centerline%
-  {\large\bf TL;DR}%
+  {\large\bf Abstract}%
   % \vspace{0.5ex}%
   \begin{quote}%
 }
