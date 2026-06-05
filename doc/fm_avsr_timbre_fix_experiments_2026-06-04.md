@@ -881,3 +881,47 @@ token set; ordered/local audio-prompt content contributes substantially. A
 speaker-only fix must either train a stronger dedicated timbre encoder from a
 larger adaptation run or keep the temporal prompt route and mask/crop the copied
 prefix at inference, accepting the current limitation.
+
+### E20: Four Segment-Pooled Prompt Cross-Attention Tokens
+
+Hypothesis:
+
+E18 removed the temporal prompt-token route too aggressively, while E19
+shuffling showed that ordered/local prompt content matters. A middle ground is
+to compress the 38 prompt frames into a small number of segment summary tokens
+before cross-attention. This keeps more prompt detail than a single mean token,
+while preventing the DiT from seeing the full 38-token prompt sequence.
+
+Implementation:
+
+`audio_prompt_cross_attn_pool_tokens: 4` splits the projected prompt sequence
+into four temporal chunks and mean-pools each chunk before concatenating those
+four summary tokens into DiT cross-attention.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool4xattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool4xattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.56942006` | `0.66612539` | `0.60174215` | `0.59765899` | `192.86 s` | stop |
+
+Conclusion:
+
+Four segment-pooled prompt tokens recover only a small part of the gap from the
+clean no-prompt-token route, and remain far below E2/historical-best corr. This
+supports the root-cause diagnosis: the current high corr depends strongly on the
+full prompt-token sequence, not only on a compact speaker summary. The
+successful fix likely needs either a stronger speaker encoder with non-temporal
+conditioning, or a training objective that explicitly prevents prompt content
+copying while preserving the full reconstruction signal.

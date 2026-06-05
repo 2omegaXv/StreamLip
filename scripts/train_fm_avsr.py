@@ -51,6 +51,7 @@ class FMHeadAVSR(_FMBase):
         audio_prompt_learned_pool_cond=False,
         audio_prompt_cross_attn=True,
         audio_prompt_cross_attn_pool=False,
+        audio_prompt_cross_attn_pool_tokens=0,
         ctc_vocab_size=0,
         ctc_topk=0,
         ctc_token_emb_dim=0,
@@ -68,6 +69,7 @@ class FMHeadAVSR(_FMBase):
             audio_prompt_learned_pool_cond=audio_prompt_learned_pool_cond,
             audio_prompt_cross_attn=audio_prompt_cross_attn,
             audio_prompt_cross_attn_pool=audio_prompt_cross_attn_pool,
+            audio_prompt_cross_attn_pool_tokens=audio_prompt_cross_attn_pool_tokens,
             ctc_vocab_size=ctc_vocab_size,
             ctc_topk=ctc_topk,
             ctc_token_emb_dim=ctc_token_emb_dim,
@@ -159,6 +161,8 @@ def parse_args():
                    help="Do not expose sequence-level audio prompt tokens to DiT cross-attention.")
     p.add_argument("--audio_prompt_cross_attn_pool", action="store_true",
                    help="Expose only one mean-pooled audio prompt token to DiT cross-attention.")
+    p.add_argument("--audio_prompt_cross_attn_pool_tokens", type=int, default=0,
+                   help="Expose N segment-pooled audio prompt tokens to DiT cross-attention; 0 keeps the existing behavior.")
     p.add_argument("--ctc_condition_mode",
                    choices=[
                        "none",
@@ -1028,6 +1032,7 @@ def main():
         audio_prompt_learned_pool_cond=args.audio_prompt_learned_pool_cond,
         audio_prompt_cross_attn=not args.no_audio_prompt_cross_attn,
         audio_prompt_cross_attn_pool=args.audio_prompt_cross_attn_pool,
+        audio_prompt_cross_attn_pool_tokens=args.audio_prompt_cross_attn_pool_tokens,
         ctc_vocab_size=args.ctc_vocab_size,
         ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
         ctc_token_emb_dim=args.ctc_token_emb_dim,
@@ -1075,6 +1080,7 @@ def main():
             audio_prompt_learned_pool_cond=args.audio_prompt_learned_pool_cond,
             audio_prompt_cross_attn=not args.no_audio_prompt_cross_attn,
             audio_prompt_cross_attn_pool=args.audio_prompt_cross_attn_pool,
+            audio_prompt_cross_attn_pool_tokens=args.audio_prompt_cross_attn_pool_tokens,
             ctc_vocab_size=args.ctc_vocab_size,
             ctc_topk=ctc_topk_dim(args.ctc_condition_mode, args.ctc_topk),
             ctc_token_emb_dim=args.ctc_token_emb_dim,
