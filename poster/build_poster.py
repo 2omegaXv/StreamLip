@@ -42,6 +42,25 @@ def clear_slide(slide):
         sp_tree.remove(element)
 
 
+def clear_body_only(slide, slide_height_inches: float):
+    """Keep template header/footer artwork; remove editable placeholder body."""
+    sp_tree = slide.shapes._spTree
+    keep = []
+    for shape in slide.shapes:
+        y = shape.top / 914400
+        bottom = (shape.top + shape.height) / 914400
+        text = shape.text.strip() if hasattr(shape, "text") else ""
+        is_template_header = y < 2.35
+        is_template_footer = bottom > slide_height_inches - 2.05
+        is_course_footer = "Deep Learning 2026 Spring" in text
+        keep.append(is_template_header or is_template_footer or is_course_footer)
+
+    for element, should_keep in zip(list(sp_tree)[2:], keep):
+        if should_keep:
+            continue
+        sp_tree.remove(element)
+
+
 def set_text(tf, text, size=24, bold=False, color=SLATE, align=None):
     tf.clear()
     p = tf.paragraphs[0]
@@ -63,6 +82,43 @@ def add_text(slide, text, x, y, w, h, size=22, bold=False, color=SLATE, align=No
     box.text_frame.margin_bottom = inch(0.04)
     set_text(box.text_frame, text, size, bold, color, align)
     return box
+
+
+def add_panel(slide, title, x, y, w, h, accent=TEAL, fill=WHITE):
+    panel = slide.shapes.add_shape(
+        MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, inch(x), inch(y), inch(w), inch(h)
+    )
+    panel.fill.solid()
+    panel.fill.fore_color.rgb = fill
+    panel.line.color.rgb = BORDER
+    panel.line.width = Pt(1.0)
+    panel.adjustments[0] = 0.035
+    add_text(slide, title, x + 0.22, y + 0.15, w - 0.44, 0.34, 12, True, accent)
+    return panel
+
+
+def add_tag(slide, text, x, y, w, color=TEAL):
+    tag = slide.shapes.add_shape(
+        MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, inch(x), inch(y), inch(w), inch(0.42)
+    )
+    tag.fill.solid()
+    tag.fill.fore_color.rgb = color
+    tag.line.fill.background()
+    tag.adjustments[0] = 0.14
+    add_text(slide, text, x + 0.08, y + 0.08, w - 0.16, 0.22, 9, True, WHITE, PP_ALIGN.CENTER)
+
+
+def add_image(slide, path, x, y, w, h):
+    if path.exists():
+        return slide.shapes.add_picture(str(path), inch(x), inch(y), inch(w), inch(h))
+    missing = slide.shapes.add_shape(
+        MSO_AUTO_SHAPE_TYPE.RECTANGLE, inch(x), inch(y), inch(w), inch(h)
+    )
+    missing.fill.solid()
+    missing.fill.fore_color.rgb = RGBColor(226, 232, 240)
+    missing.line.color.rgb = BORDER
+    add_text(slide, f"Missing asset:\n{path.name}", x + 0.2, y + 0.2, w - 0.4, h - 0.4, 12, True, MUTED, PP_ALIGN.CENTER)
+    return missing
 
 
 def add_section(slide, title, x, y, w, h):
@@ -202,347 +258,171 @@ def add_condition_table(slide, x, y, w, h):
 def build():
     prs = Presentation(str(TEMPLATE))
     slide = prs.slides[0]
-    clear_slide(slide)
 
     sw = prs.slide_width / 914400
     sh = prs.slide_height / 914400
+    clear_body_only(slide, sh)
 
     bg = slide.background.fill
     bg.solid()
     bg.fore_color.rgb = LIGHT
 
-    header = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, inch(0), inch(0), inch(sw), inch(2.28))
-    header.fill.solid()
-    header.fill.fore_color.rgb = NAVY
-    header.line.fill.background()
+    # Body background. Template header/footer artwork remains untouched.
+    body_top = 2.45
+    body_bottom = 41.18
+    body_h = body_bottom - body_top
+    bg_rect = slide.shapes.add_shape(
+        MSO_AUTO_SHAPE_TYPE.RECTANGLE, inch(0), inch(body_top), inch(sw), inch(body_h)
+    )
+    bg_rect.fill.solid()
+    bg_rect.fill.fore_color.rgb = RGBColor(247, 251, 252)
+    bg_rect.line.fill.background()
 
-    footer = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, inch(0), inch(sh - 1.45), inch(sw), inch(1.45))
-    footer.fill.solid()
-    footer.fill.fore_color.rgb = NAVY
-    footer.line.fill.background()
-
-    add_text(slide, "Audio-Centric Visual Speech Reconstruction", 0.75, 0.35, 23.0, 0.7, 31, True, WHITE)
-    add_text(slide, "Weak text helps alignment, while lip/audio latents carry the speech signal", 0.78, 1.17, 22.5, 0.42, 16, False, RGBColor(203, 213, 225))
-    add_text(slide, "DL-V2A 2026", 25.3, 0.55, 6.8, 0.45, 17, True, WHITE, PP_ALIGN.RIGHT)
-    add_text(slide, "Recon model | Auto-AVSR preprocessing | Trump silent-reference demo", 18.5, 1.19, 13.5, 0.38, 12, False, RGBColor(203, 213, 225), PP_ALIGN.RIGHT)
-
-    margin = 0.65
-    gap = 0.42
-    col_w = (sw - 2 * margin - 2 * gap) / 3
-    col1 = margin
-    col2 = margin + col_w + gap
-    col3 = margin + 2 * (col_w + gap)
-    top = 2.65
-
-    add_section(slide, "1. Why audio-centric?", col1, top, col_w, 7.0)
-    add_bullets(
-        slide,
-        [
-            "Direct vision -> text -> TTS makes text accuracy the bottleneck.",
-            "Our finding: audio quality stays strong when AVSR text is noisy; lip/audio latents matter more.",
-            "The model reconstructs Mimi audio latents from visual, text, and timbre conditions.",
-        ],
-        col1 + 0.35,
-        top + 1.0,
-        col_w - 3.9,
-        3.6,
-        17,
-    )
-    add_captioned_image(
-        slide,
-        ASSET_DIR / "generated_central_hero.png",
-        "GPT-generated concept visual: lip cues -> latent speech",
-        col1 + col_w - 3.05,
-        top + 0.98,
-        2.55,
-        3.83,
-    )
-    add_metric(slide, "GT text corr", "0.5818", "val1000 final", col1 + 0.35, top + 5.35, 2.9, GREEN)
-    add_metric(slide, "AVSR text corr", "0.5783", "drop only 0.0035", col1 + 3.45, top + 5.35, 3.15, TEAL)
-    add_metric(slide, "FM corr", "~0.35", "sampling route rejected", col1 + 6.8, top + 5.35, 2.9, ORANGE)
-
-    add_section(slide, "2. Data processing", col1, top + 7.55, col_w, 12.1)
-    add_condition_table(slide, col1 + 0.35, top + 8.55, col_w - 0.7, 4.8)
+    # Title block.
+    add_text(slide, "Audio-Centric Visual Speech Reconstruction", 1.05, 2.88, 31.0, 0.72, 34, True, NAVY, PP_ALIGN.CENTER)
     add_text(
         slide,
-        "Reprocessed clips are stored under data/processed/pretrain/*/* with AVSR-compatible lip crops and text. This is a model input decision, not just a cleanup step.",
-        col1 + 0.38,
-        top + 13.75,
-        col_w - 0.75,
-        1.15,
-        14,
-        False,
-        SLATE,
-    )
-    add_text(
-        slide,
-        "Key point: text is intentionally a weak condition. Even high word-error AVSR text can still preserve intelligible speech when the lip/audio path is reliable.",
-        col1 + 0.38,
-        top + 15.35,
-        col_w - 0.75,
-        1.15,
-        14,
-        True,
-        NAVY,
-    )
-    add_bullets(
-        slide,
-        [
-            "Training/eval data path: raw clip -> face/lip preprocessing -> Auto-AVSR visual/text -> language hidden states -> Mimi audio latent target.",
-            "Silent demo path: silent MP4 plus ref audio/video segment; the first 3.04 s reference is encoded as audio prompt and timbre statistics.",
-            "The same preprocessing script is used for raw-video inference so evaluation inputs match the new lip_avsr training representation.",
-        ],
-        col1 + 0.35,
-        top + 17.15,
-        col_w - 0.7,
-        2.15,
-        12,
-    )
-
-    add_section(slide, "3. Recon architecture", col2, top, col_w, 11.1)
-    add_pipeline(slide, col2 + 0.35, top + 1.05, col_w - 0.7, 1.0)
-    arch = ASSET_DIR / "system_architecture.png"
-    add_captioned_image(slide, arch, "Condition fusion into Mimi latent reconstruction", col2 + 0.35, top + 2.35, col_w - 0.7, 6.2)
-    add_text(
-        slide,
-        "The decoder predicts normalized Mimi latents, which are decoded by the audio codec and muxed back to video. The video stream is preserved; only the speech track is reconstructed.",
-        col2 + 0.45,
-        top + 9.05,
-        col_w - 0.9,
-        1.0,
-        13,
-        False,
-        SLATE,
-    )
-
-    add_section(slide, "4. Mathematical form", col2, top + 11.55, col_w, 8.4)
-    add_text(slide, "C = {visual, text,\nspeaker, audio_prompt,\ntimbre}", col2 + 0.42, top + 12.42, 4.35, 1.05, 16, True, TEAL)
-    add_text(slide, "y_base = f_base(C)", col2 + 0.42, top + 13.65, 4.35, 0.42, 18, False, SLATE)
-    add_text(slide, "delta = f_residual(C)", col2 + 0.42, top + 14.22, 4.35, 0.42, 18, False, SLATE)
-    add_text(slide, "y_hat = y_base + delta", col2 + 0.42, top + 14.82, 4.35, 0.48, 19, True, GREEN)
-    add_captioned_image(
-        slide,
-        ASSET_DIR / "generated_residual_method.png",
-        "GPT-generated residual recon schematic",
-        col2 + 5.1,
-        top + 12.45,
-        col_w - 5.55,
-        2.55,
-    )
-    add_text(
-        slide,
-        "Current inference uses x_tilde = 0 and tau = 1. There is no iterative denoise loop; this is a deterministic one-step residual reconstruction of the target Mimi latent.",
-        col2 + 0.42,
-        top + 15.35,
-        col_w - 0.84,
-        1.25,
-        14,
-        False,
-        SLATE,
-    )
-    add_text(
-        slide,
-        "Why this matters: it avoids the unstable FM sampling route and directly optimizes the latent representation used by the audio codec.",
-        col2 + 0.42,
-        top + 17.0,
-        col_w - 0.84,
-        0.8,
-        14,
-        True,
-        NAVY,
-    )
-    add_text(
-        slide,
-        "Interpretation: no Gaussian noise state is sampled during inference; tau is kept at 1 during training and evaluation for this endpoint objective.",
-        col2 + 0.42,
-        top + 18.25,
-        col_w - 0.84,
-        0.65,
-        12,
-        False,
-        MUTED,
-    )
-
-    add_section(slide, "5. Evaluation trend", col2, top + 20.35, col_w, 10.3)
-    add_bar_chart(slide, col2 + 0.65, top + 21.65, col_w - 1.3, 5.0)
-    add_text(
-        slide,
-        "Corr improved from the 10k baseline to the final 59k timbre-conditioned model. The AVSR-text run barely drops, supporting the weak-text condition hypothesis.",
-        col2 + 0.45,
-        top + 27.5,
-        col_w - 0.9,
-        0.95,
-        14,
-        False,
-        SLATE,
-    )
-    add_metric(slide, "10k baseline", "0.507", "small data", col2 + 0.55, top + 29.05, 2.7, TEAL)
-    add_metric(slide, "30k + timbre", "0.563", "speaker style", col2 + 3.55, top + 29.05, 3.0, GREEN)
-    add_metric(slide, "final 59k", "0.582", "best model", col2 + 6.85, top + 29.05, 2.8, NAVY)
-
-    add_section(slide, "6. Trump silent-reference demo", col3, top, col_w, 17.8)
-    add_text(
-        slide,
-        "Input: 26.57 s silent Trump video. Reference: final 3.02 s audio segment. Output: 23.55 s generated post-prompt video.",
-        col3 + 0.35,
-        top + 0.95,
-        col_w - 0.7,
-        0.8,
-        14,
-        False,
-        SLATE,
-    )
-    img_w = (col_w - 1.0) / 3
-    add_captioned_image(slide, ASSET_DIR / "trump_silent_frame.png", "silent input", col3 + 0.35, top + 2.05, img_w, img_w)
-    add_captioned_image(slide, ASSET_DIR / "trump_ref_frame.png", "reference", col3 + 0.5 + img_w, top + 2.05, img_w, img_w)
-    add_captioned_image(slide, ASSET_DIR / "trump_generated_frame.png", "generated crop", col3 + 0.65 + 2 * img_w, top + 2.05, img_w, img_w)
-    add_captioned_image(slide, ASSET_DIR / "trump_ref_wave.png", "reference waveform", col3 + 0.45, top + 5.75, col_w - 0.9, 1.2)
-    add_captioned_image(slide, ASSET_DIR / "trump_generated_wave.png", "generated waveform", col3 + 0.45, top + 7.55, col_w - 0.9, 1.2)
-    add_text(
-        slide,
-        "Auto-AVSR text: \"OUR COUNTRY IS WINNING ... WE'RE WINNING SO MUCH ... WE WINNING TOO MUCH ...\"",
-        col3 + 0.45,
-        top + 9.75,
-        col_w - 0.9,
-        0.9,
-        15,
-        True,
-        NAVY,
-    )
-    add_text(
-        slide,
-        "The listening export drops the first 3.04 s because the current timbre prompt can be copied at the beginning.",
-        col3 + 0.45,
-        top + 11.0,
-        col_w - 0.9,
-        0.85,
-        13,
-        False,
-        RED,
-    )
-    add_bullets(
-        slide,
-        [
-            "Recommended ref mode: use an unmasked segment from the same video when available.",
-            "Zero-ref mode runs, but timbre is weaker and less speaker-specific.",
-            "The generated asset is checked in under data/assets/trump_silent_ref_demo/.",
-        ],
-        col3 + 0.45,
-        top + 12.35,
-        col_w - 0.9,
-        2.35,
-        13,
-    )
-    add_text(
-        slide,
-        "Demo phrase: win-win-win / \"WE'RE WINNING SO MUCH\"",
-        col3 + 0.45,
-        top + 15.55,
-        col_w - 0.9,
-        0.6,
-        14,
+        "Lip and audio latents carry the speech signal; text is a weak alignment cue",
+        2.1,
+        3.72,
+        28.9,
+        0.42,
+        16,
         True,
         TEAL,
+        PP_ALIGN.CENTER,
     )
-
-    add_section(slide, "7. What is new?", col3, top + 18.25, col_w, 7.0)
-    add_bullets(
-        slide,
-        [
-            "Residual endpoint reconstruction replaces FM denoise sampling.",
-            "Timbre/reference conditioning improves speaker style over plain regression.",
-            "Text is demoted to an auxiliary alignment signal instead of the primary content bottleneck.",
-            "AVSR-compatible data preprocessing makes raw-video inference match training inputs.",
-        ],
-        col3 + 0.35,
-        top + 19.2,
-        col_w - 0.7,
-        4.2,
-        14,
+    claim = slide.shapes.add_shape(
+        MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, inch(2.2), inch(4.45), inch(28.7), inch(1.1)
     )
+    claim.fill.solid()
+    claim.fill.fore_color.rgb = NAVY
+    claim.line.fill.background()
+    claim.adjustments[0] = 0.08
     add_text(
         slide,
-        "The contribution is the full architecture and evidence: data-compatible AVSR latents, weak text conditioning, residual endpoint recon, and a reproducible silent-video demo.",
-        col3 + 0.38,
-        top + 23.55,
-        col_w - 0.76,
-        0.75,
-        12,
+        "Replace vision -> text -> TTS with direct Mimi latent reconstruction",
+        2.45,
+        4.73,
+        28.2,
+        0.42,
+        21,
         True,
-        NAVY,
+        WHITE,
+        PP_ALIGN.CENTER,
     )
 
-    add_section(slide, "8. Current limitation", col3, top + 25.7, col_w, 5.55)
+    # Central architecture.
+    add_panel(slide, "1  SYSTEM ARCHITECTURE", 1.05, 6.15, 31.0, 14.65)
+    add_image(slide, ASSET_DIR / "generated_architecture_white.png", 1.55, 6.75, 30.0, 12.75)
     add_text(
         slide,
-        "The audio_prompt is temporal: (38, 512) Mimi frames from the first 3.04 s. It provides strong timbre control, but the model can learn to copy prompt content. Next step: fixed-size timbre embedding or random prompt dropout/windowing during training.",
-        col3 + 0.38,
-        top + 26.65,
-        col_w - 0.76,
-        1.55,
-        13,
+        "Generated architecture visual, with exact interpretation: lip video and weak text/timbre conditions drive a residual Mimi latent reconstructor and decoder.",
+        2.0,
+        19.65,
+        29.0,
+        0.48,
+        11,
+        False,
+        MUTED,
+        PP_ALIGN.CENTER,
+    )
+
+    # Method, evidence, and data row.
+    row_y = 21.25
+    gap = 0.35
+    col_w = (31.0 - 2 * gap) / 3
+    x1 = 1.05
+    x2 = x1 + col_w + gap
+    x3 = x2 + col_w + gap
+
+    add_panel(slide, "2  DATA / CONDITIONS", x1, row_y, col_w, 8.1)
+    add_condition_table(slide, x1 + 0.28, row_y + 0.72, col_w - 0.56, 4.8)
+    add_text(
+        slide,
+        "The final path uses AVSR-compatible lip crops rather than the old RGB lip crop. External videos use lip-AVSR text with uniform alignment.",
+        x1 + 0.32,
+        row_y + 5.95,
+        col_w - 0.64,
+        1.2,
+        11,
         False,
         SLATE,
     )
-    add_bullets(
-        slide,
-        [
-            "Current mitigation: crop first 3.04 s from listening exports.",
-            "Better direction: speaker-only timbre embedding independent of utterance time.",
-            "Training idea: random reference windows, content dropout, or contrastive speaker loss.",
-        ],
-        col3 + 0.38,
-        top + 28.55,
-        col_w - 0.76,
-        1.75,
-        12,
-    )
+    add_tag(slide, "text is support, not bottleneck", x1 + 0.75, row_y + 7.25, col_w - 1.5, TEAL)
 
-    add_section(slide, "9. End-to-end artifacts", col1, top + 20.1, col_w, 8.2)
-    add_captioned_image(
-        slide,
-        ASSET_DIR / "generated_silent_demo_strip.png",
-        "GPT-generated silent-video restoration overview",
-        col1 + 0.35,
-        top + 21.0,
-        col_w - 0.7,
-        2.65,
-    )
-    add_bullets(
-        slide,
-        [
-            "scripts/run_raw_video_avsr_recon_pipeline.py runs preprocessing, AVSR text/latent extraction, recon inference, Mimi decode, and muxing.",
-            "scripts/gradio_avsr_gui.py exposes the same flow in a simple GUI.",
-            "README documents normal video mode, silent/ref mode, and the current prompt-cropping behavior.",
-            "poster/build.sh rebuilds this poster into PPTX, PDF, and PNG preview.",
-        ],
-        col1 + 0.35,
-        top + 24.25,
-        col_w - 0.7,
-        2.25,
-        11,
-    )
+    add_panel(slide, "3  DETERMINISTIC RECON", x2, row_y, col_w, 8.1)
+    add_image(slide, ASSET_DIR / "generated_residual_method_white.png", x2 + 0.3, row_y + 0.82, col_w - 0.6, 3.1)
+    add_text(slide, "C = {visual, text, speaker, audio prompt, timbre}", x2 + 0.38, row_y + 4.25, col_w - 0.76, 0.35, 12, True, TEAL, PP_ALIGN.CENTER)
+    add_text(slide, "y_hat = y_base + delta", x2 + 0.38, row_y + 4.82, col_w - 0.76, 0.45, 18, True, GREEN, PP_ALIGN.CENTER)
     add_text(
         slide,
-        "Submission-ready example: silent MP4 + 3 s reference -> voiced MP4. The Trump demo is self-contained and reproducible from checked-in assets.",
-        col1 + 0.38,
-        top + 27.45,
+        "The final checkpoint fixes x_tilde = 0 and tau = 1. It is endpoint regression through a frozen base plus residual correction, not an iterative FM sampling loop.",
+        x2 + 0.38,
+        row_y + 5.55,
         col_w - 0.76,
-        1.0,
-        13,
-        True,
-        NAVY,
+        1.25,
+        11,
+        False,
+        SLATE,
     )
 
-    add_section(slide, "10. Main takeaway", col1, top + 28.8, col_w, 8.6)
+    add_panel(slide, "4  EVIDENCE", x3, row_y, col_w, 8.1)
+    add_bar_chart(slide, x3 + 0.65, row_y + 1.05, col_w - 1.3, 3.0)
+    add_text(slide, "Final full-val metrics, normalized Mimi latent space", x3 + 0.35, row_y + 4.55, col_w - 0.7, 0.28, 10, True, MUTED, PP_ALIGN.CENTER)
+    rows = [
+        ("final corr", "0.5819"),
+        ("GT -> AVSR text drop", "0.0035"),
+        ("FM sampling corr", "~0.35"),
+    ]
+    for i, (label, value) in enumerate(rows):
+        y = row_y + 5.05 + i * 0.55
+        add_text(slide, label, x3 + 0.65, y, col_w - 2.2, 0.25, 11, True, NAVY)
+        add_text(slide, value, x3 + col_w - 1.85, y, 1.2, 0.25, 11, True, TEAL, PP_ALIGN.RIGHT)
+    add_text(
+        slide,
+        "Timbre/audio-prompt conditioning and residual endpoint recon account for the main gains; exact transcript quality is not the dominant failure mode.",
+        x3 + 0.4,
+        row_y + 6.85,
+        col_w - 0.8,
+        0.82,
+        10,
+        False,
+        SLATE,
+    )
+
+    # Demo band.
+    demo_y = 30.05
+    add_panel(slide, "5  SILENT-REFERENCE DEMO", 1.05, demo_y, 31.0, 5.35)
+    add_image(slide, ASSET_DIR / "generated_silent_demo_white.png", 1.55, demo_y + 0.72, 15.2, 3.35)
+    thumb_w = 3.05
+    add_captioned_image(slide, ASSET_DIR / "trump_silent_frame.png", "silent input", 17.3, demo_y + 0.86, thumb_w, thumb_w)
+    add_captioned_image(slide, ASSET_DIR / "trump_ref_wave.png", "reference waveform", 20.65, demo_y + 0.86, 4.2, thumb_w)
+    add_captioned_image(slide, ASSET_DIR / "trump_generated_frame.png", "generated crop", 25.2, demo_y + 0.86, thumb_w, thumb_w)
+    add_text(
+        slide,
+        "Trump example: silent MP4 + short reference segment -> voiced MP4. The visual stream is preserved; only the speech track is reconstructed.",
+        17.25,
+        demo_y + 4.24,
+        13.95,
+        0.42,
+        11,
+        True,
+        NAVY,
+        PP_ALIGN.CENTER,
+    )
+
+    # Bottom takeaway row.
+    take_y = 36.0
+    add_panel(slide, "6  TAKEAWAY", 1.05, take_y, 15.15, 4.65)
     add_text(
         slide,
         "We should not treat lip video as a text-recognition problem followed by speech synthesis.",
-        col1 + 0.38,
-        top + 29.8,
-        col_w - 0.76,
-        0.75,
-        18,
+        1.45,
+        take_y + 0.9,
+        14.35,
+        0.6,
+        17,
         True,
         TEAL,
     )
@@ -550,84 +430,55 @@ def build():
         slide,
         [
             "Lip motion provides phonetic and timing evidence.",
-            "Mimi latents preserve acoustic structure and codec-compatible speech detail.",
-            "Text tokens provide alignment and coarse semantics, but do not need to be perfect.",
-            "Timbre reference improves voice identity, while exposing a prompt-leakage limitation to fix.",
+            "Mimi latents preserve codec-compatible acoustic structure.",
+            "Weak text stabilizes content but does not need to be perfect.",
+            "Timbre/reference conditions carry speaker and recording color.",
         ],
-        col1 + 0.35,
-        top + 31.1,
-        col_w - 0.7,
-        3.6,
-        14,
+        1.45,
+        take_y + 1.75,
+        14.35,
+        2.1,
+        12,
     )
     add_text(
         slide,
-        "Result: a practical raw-video restoration pipeline with stronger audio quality than the FM sampling branch and much lower dependence on exact ASR text.",
-        col1 + 0.38,
-        top + 35.6,
-        col_w - 0.76,
-        1.0,
-        14,
+        "This supports an audio-latent reconstruction architecture over a strict text cascade.",
+        1.45,
+        take_y + 3.72,
+        14.3,
+        0.35,
+        11,
         True,
         NAVY,
     )
 
-    add_section(slide, "11. Why not cascade?", col2, top + 31.15, col_w, 6.25)
+    add_panel(slide, "7  ARTIFACTS", 16.9, take_y, 15.15, 4.65)
     add_bullets(
         slide,
         [
-            "Cascade: lip -> text -> TTS must solve exact word recovery before generating audio.",
-            "Our route: lip/audio latent reconstruction can tolerate noisy text because visual and audio conditions dominate.",
-            "Empirical check: replacing GT text with AVSR text changes corr from 0.5818 to 0.5783.",
-        ],
-        col2 + 0.35,
-        top + 32.05,
-        col_w - 0.7,
-        3.35,
-        14,
-    )
-    add_text(
-        slide,
-        "This is the central architectural argument: use text as support, not as the only bridge between video and sound.",
-        col2 + 0.38,
-        top + 35.75,
-        col_w - 0.76,
-        0.75,
-        14,
-        True,
-        NAVY,
-    )
-
-    add_section(slide, "12. Files to show", col3, top + 31.75, col_w, 5.65)
-    add_bullets(
-        slide,
-        [
-            "poster/fm_avsr_poster.pptx",
-            "poster/fm_avsr_poster.pdf",
-            "poster/fm_avsr_poster_preview.png",
+            "scripts/run_raw_video_avsr_recon_pipeline.py",
+            "scripts/gradio_avsr_gui.py",
+            "poster/fm_avsr_poster.pptx and PDF preview",
             "data/assets/trump_silent_ref_demo/*.mp4",
             "eval_out/trump_raw_prompt_pipeline/.../avsr_text_lipavsr.txt",
         ],
-        col3 + 0.35,
-        top + 32.65,
-        col_w - 0.7,
-        3.25,
-        13,
+        17.3,
+        take_y + 0.9,
+        14.4,
+        2.75,
+        12,
     )
     add_text(
         slide,
-        "All paths are relative to the fm-avsr-cleanup worktree.",
-        col3 + 0.38,
-        top + 35.65,
-        col_w - 0.76,
-        0.6,
-        12,
+        "Generated visual components are stored under poster/assets/generated_*.png.",
+        17.3,
+        take_y + 3.45,
+        14.35,
+        0.42,
+        10,
         False,
         MUTED,
     )
-
-    add_text(slide, "Deep Learning 2026 Spring", 0.75, sh - 1.03, 8.0, 0.42, 14, True, WHITE)
-    add_text(slide, "DL-V2A | FM-AVSR cleanup branch | Generated from poster/build_poster.py", 9.0, sh - 1.03, 23.2, 0.42, 12, False, RGBColor(203, 213, 225), PP_ALIGN.RIGHT)
 
     prs.save(str(OUT))
     print(OUT)
