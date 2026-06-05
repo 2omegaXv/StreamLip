@@ -1,8 +1,8 @@
 """
 StreamLip V2: Dual-path architecture with Product of Experts decoding.
 
-Theory: see theory.md (causal graph, PoE derivation, FM conditioning).
-Design: see MODEL_DESIGN.md §4–6.
+Legacy theory: see archive/docs_legacy/theory.md.
+Legacy design: see archive/docs_legacy/MODEL_DESIGN.md §4–6.
 
 Text path:
   lip → VisualEncoderV2 → (vis_feat, s_vis)

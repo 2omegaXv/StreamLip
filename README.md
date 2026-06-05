@@ -21,6 +21,22 @@ scripts/gradio_avsr_gui.py
 Legacy v2/v3/v4, Mimi-code, teacher-cache, and sweep scripts are archived under
 `archive/scripts/`.
 
+## Current Documentation
+
+Use these files for the current implemented system:
+
+```text
+doc/fm_avsr_final_status_2026-06-04.md
+doc/fm_avsr_audio_generation_architecture.md
+doc/raw_video_avsr_recon_pipeline_usage.md
+report/fm_avsr_final_report_2026-06-04.pdf
+poster/fm_avsr_poster.pdf
+```
+
+Historical proposal, literature, early design, and old paper-reading materials
+are archived under `archive/`. They are retained for traceability but should not
+be treated as the current architecture.
+
 ## Environment
 
 Use the shared virtualenv from the main checkout:
