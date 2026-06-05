@@ -103,11 +103,11 @@ The final technical contributions are:
 Data construction is a core part of the method. Each clip is converted into a
 matched set of visual, text, speaker, and audio-latent files. The model never
 uses raw text alone as the generation target; all training and evaluation are
-defined against Mimi continuous latents.
+defined against Mimi~\cite{defossez2024moshi} continuous latents.
 
 \subsection{Training and Validation Splits}
 
-The final checkpoint is trained on the StreamLip-compatible processed pretrain split with
+The final checkpoint is trained on the StreamLip-compatible processed LRS3~\cite{afouras2018lrs3} pretrain split with
 59,144 training clips and evaluated on a fixed 1,000-clip validation split:
 \begin{itemize}
     \item train split:
@@ -154,7 +154,7 @@ StreamLip:
     e^{v}_{1:T_v} = E_{\mathrm{vis}}(V_{\mathrm{lip}}),
     \qquad e^{v}_t \in \mathbb{R}^{768}.
 \end{equation}
-In the current implementation, $E_{\mathrm{vis}}$ is initialized from a public
+In the current implementation, $E_{\mathrm{vis}}$ is initialized from the Auto-AVSR~\cite{ma2023autoavsr}
 Conformer-style visual speech encoder and kept frozen.
 The project contribution is the downstream StreamLip text branch and the
 audio-latent reconstruction model built on this representation. For external
@@ -183,7 +183,7 @@ than as a standalone preprocessing contribution.}
 
 \subsection{Audio Latent Target}
 
-Mimi provides the continuous audio latent target. For each audio-latent frame
+Mimi~\cite{defossez2024moshi} provides the continuous audio latent target. For each audio-latent frame
 $z_t \in \mathbb{R}^{512}$, the training target is normalized per latent
 dimension:
 \begin{equation}
@@ -318,14 +318,14 @@ StreamLip V5 uses a two-stage design:
     \xrightarrow{\text{frozen visual speech encoder}}
     e^v_{1:T} \in \mathbb{R}^{T \times 768}
     \xrightarrow{\text{proj} + \text{Gated Cross-Attn}}
-    \text{OLMo-1B}
+    \text{OLMo-1B}~\cite{groeneveld2024olmo}
     \longrightarrow \hat{w}_{1:N}
 \end{equation}
 
 The visual encoder is the frozen Conformer-style visual speech encoder used by
 our StreamLip preprocessing path. Its output features are projected to the
 OLMo-1B hidden dimension (2048) and injected into every 4th transformer layer
-via Flamingo-style Gated Cross-Attention:
+via Flamingo-style Gated Cross-Attention~\cite{alayrac2022flamingo}:
 \begin{equation}
     x \leftarrow x + \tanh(\alpha) \cdot \mathrm{CrossAttn}(x,\, e^v),
     \qquad \alpha \text{ initialized to } 0.1.
@@ -686,15 +686,47 @@ stronger timbre control, V5 alignment heads, and higher-fidelity latent decoding
 
 \begin{thebibliography}{1}
 
+\bibitem[Afouras et~al.(2018)]{afouras2018lrs3}
+Triantafyllos Afouras, Joon Son Chung, and Andrew Zisserman.
+\newblock {LRS3-TED}: A large-scale dataset for visual speech recognition.
+\newblock \emph{arXiv preprint arXiv:1809.00496}, 2018.
+
 \bibitem[Alayrac et~al.(2022)]{alayrac2022flamingo}
 Jean-Baptiste Alayrac, Jeff Donahue, Pauline Luc, Antoine Miech, Iain Barr,
 Yana Hasson, Karel Lenc, Arthur Mensch, Katherine Millican, Malcolm Reynolds,
-Roman Ring, Eliza Rutherford, Serkan Cabi, Tengda Han, Zhitao Gong, Sina Samangooei,
-Marianne Monteiro, Jacob Menick, Sebastian Borgeaud, Andrew Brock, Aida Nematzadeh,
-Sahand Sharifi, Miko{\l}aj Bi{\'n}kowski, Ricardo Barreira, Oriol Vinyals,
-Andrew Zisserman, and Karen Simonyan.
+Roman Ring, Eliza Rutherford, Serkan Cabi, Tengda Han, Zhitao Gong, Sina
+Samangooei, Marianne Monteiro, Jacob Menick, Sebastian Borgeaud, Andrew Brock,
+Aida Nematzadeh, Sahand Sharifi, Miko{\l}aj Bi{\'n}kowski, Ricardo Barreira,
+Oriol Vinyals, Andrew Zisserman, and Karen Simonyan.
 \newblock Flamingo: a visual language model for few-shot learning.
 \newblock In \emph{Advances in Neural Information Processing Systems}, 2022.
+
+\bibitem[D{\'e}fossez et~al.(2024)]{defossez2024moshi}
+Alexandre D{\'e}fossez, Laurent Mazar{\'e}, Manu Orsini, Am{\'e}lie Royer,
+Patrick P{\'e}rez, Herv{\'e} J{\'e}gou, Edouard Grave, and Neil Zeghidour.
+\newblock Moshi: A speech-text foundation model for real-time dialogue.
+\newblock \emph{arXiv preprint arXiv:2410.00037}, 2024.
+
+\bibitem[Groeneveld et~al.(2024)]{groeneveld2024olmo}
+Dirk Groeneveld, Iz Beltagy, Pete Walsh, Akshita Bhagia, Rodney Kinney,
+Oyvind Tafjord, Ananya Harsh Jha, Hamish Ivison, Ian Magnusson, Yizhong Wang,
+Shane Arora, David Atkinson, Russell Authur, Khyathi Chandu, Arman Cohan,
+Jennifer Dumas, Yanai Elazar, Yuling Gu, Jack Hessel, Tushar Khot,
+William Merrill, Jacob Morrison, Niklas Muennighoff, Aakanksha Naik,
+Crystal Nam, Matthew Peters, Valentina Pyatkin, Abhilasha Ravichander,
+Dustin Schwenk, Saurabh Shah, Will Smith, Emma Strubell, Nishant Subramani,
+Mitchell Wortsman, Pradeep Dasigi, Nathan Lambert, Kyle Richardson,
+Luke Zettlemoyer, Jesse Dodge, Kyle Lo, Luca Soldaini, Noah Smith, and
+Hannaneh Hajishirzi.
+\newblock {OLMo}: Accelerating the science of language models.
+\newblock \emph{arXiv preprint arXiv:2402.00838}, 2024.
+
+\bibitem[Ma et~al.(2023)]{ma2023autoavsr}
+Pingchuan Ma, Alexandros Haliassos, Adriana Fernandez-Lopez, Honglie Chen,
+Stavros Petridis, and Maja Pantic.
+\newblock Auto-{AVSR}: Audio-visual speech recognition with automatic labels.
+\newblock In \emph{IEEE International Conference on Acoustics, Speech and
+Signal Processing (ICASSP)}, 2023.
 
 \end{thebibliography}
 
