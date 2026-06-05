@@ -1084,3 +1084,82 @@ correlates with the shifted prompt at about `0.958` and with the true target
 prefix at only about `0.036`, for both E2 and E21. E21 is a metric-preserving
 augmentation, but not a verified fix for prompt copying or speaker-content
 leakage. The current success criteria are therefore still unmet.
+
+### E23: Audio-Prompt Token Dropout 0.50
+
+Hypothesis:
+
+Randomly zeroing prompt tokens during training should make the model less able
+to rely on exact prompt content while still validating with the normal prefix
+prompt.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_promptdrop50_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_promptdrop50_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58432217` | `0.64908975` | `0.59185386` | `0.59465802` | `188.58 s` | weak candidate |
+
+Prompt-shift diagnostic (`n=1000`, `audio_prompt_condition_shift=1`):
+
+| Run | shifted-prompt mean_corr | prefix-target corr | prefix-prompt corr |
+| --- | ---: | ---: | ---: |
+| E23 prompt dropout 0.50 | `0.50838235` | `0.03658937` | `0.95813630` |
+
+Conclusion:
+
+Prompt dropout 0.50 preserves the standard validation metric slightly above the
+historical best, but it does not fix prompt copying. The generated prefix still
+tracks the shifted prompt with corr about `0.958`.
+
+### E24: Same-Parent Prompt Training, Prefix Prompt Validation
+
+Hypothesis:
+
+Training with the next clip from the same parent/speaker as the audio prompt
+should preserve speaker information while making prompt content different from
+the target prefix. Validation still uses the normal `self_prefix` prompt. This
+is a stronger anti-copy augmentation than shuffle/dropout.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_sameparenttrain_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_sameparenttrain_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58435046` | `0.64912504` | `0.59182436` | `0.58990383` | `168.19 s` | best corr, not fixed |
+
+Prompt-shift diagnostic (`n=1000`, `audio_prompt_condition_shift=1`):
+
+| Run | shifted-prompt mean_corr | prefix-target corr | prefix-prompt corr |
+| --- | ---: | ---: | ---: |
+| E24 same-parent train / prefix val | `0.50850303` | `0.03679529` | `0.95814318` |
+
+Conclusion:
+
+E24 is the highest standard validation corr in this stage and beats both E2
+(`0.58434393`) and the historical best (`0.58431531`). However, the prompt-shift
+diagnostic still shows near-identical prefix copying: the generated prefix
+correlates with the shifted prompt at about `0.958`. E24 improves the metric but
+does not satisfy the timbre/copy-fix requirement.
