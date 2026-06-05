@@ -925,3 +925,92 @@ full prompt-token sequence, not only on a compact speaker summary. The
 successful fix likely needs either a stronger speaker encoder with non-temporal
 conditioning, or a training objective that explicitly prevents prompt content
 copying while preserving the full reconstruction signal.
+
+### E21: Train-Time Shuffled Prompt, Validation Prefix Prompt
+
+Hypothesis:
+
+E19 evaluated shuffled prompt tokens at validation time, which is stricter than
+the actual inference interface. A more practical diagnostic is to shuffle the
+prefix prompt only during continued training, while validating with the normal
+ordered prefix prompt. If this keeps corr above the historical best, it may
+reduce sensitivity to prompt order without changing the deployment input.
+
+Implementation:
+
+- add `val_audio_prompt_ref_mode` to `scripts/train_fm_avsr.py`;
+- training dataset uses `audio_prompt_ref_mode: self_prefix_shuffle`;
+- validation dataset uses `val_audio_prompt_ref_mode: self_prefix`;
+- architecture remains the E2 temporal prompt-token path.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_trainshuffle_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_trainshuffle_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58433182` | `0.64906850` | `0.59179682` | `0.59104872` | `217.30 s` | keep candidate |
+
+Conclusion:
+
+This is the first shuffle-based run that remains above the historical-best
+validation corr (`0.58431531`) while using the normal ordered prompt at
+validation time. It is still slightly below E2 (`0.58434393`) and does not
+structurally remove the full prompt-token cross-attention route, so it is not a
+complete proof that prompt-copying is fixed. It is, however, the strongest
+candidate so far for preserving the metric while regularizing prompt-order
+dependence. The next required check is a direct copy-risk/listening diagnostic
+against E2.
+
+### E21: Train With Shuffled Prompt, Validate With Prefix Prompt
+
+Hypothesis:
+
+E19 trained and validated with shuffled prompt tokens. That measured robustness
+to shuffled inference prompts, but the deployment path still uses a normal
+prefix/ref prompt. Add a validation-only prompt mode so the model can be trained
+with shuffled prompt augmentation while validation keeps the realistic
+`self_prefix` prompt.
+
+Code change:
+
+- add `val_audio_prompt_ref_mode`;
+- training keeps `audio_prompt_ref_mode`;
+- validation defaults to the training mode unless explicitly overridden.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_shuffletrain_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_shuffletrain_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58433374` | `0.64906445` | `0.59179790` | `0.58967608` | `184.12 s` | keep candidate |
+
+Conclusion:
+
+Training-time prompt shuffling does not immediately break normal prefix-prompt
+validation. It beats the historical best (`0.58431531`) but remains slightly
+below E2 (`0.58434393`). This is the first candidate in this stage that both
+introduces an anti-copy augmentation and clears the historical-best gate on the
+standard prefix validation path. It still needs perceptual/prompt-copy
+verification before being treated as a real timbre fix.

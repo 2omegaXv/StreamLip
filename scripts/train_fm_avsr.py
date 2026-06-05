@@ -149,6 +149,17 @@ def parse_args():
                    ],
                    default="self_prefix",
                    help="Source clip for training audio prompt construction.")
+    p.add_argument("--val_audio_prompt_ref_mode",
+                   choices=[
+                       "self_prefix",
+                       "same_parent_next",
+                       "self_random_window",
+                       "self_late_window",
+                       "self_prefix_reverse",
+                       "self_prefix_shuffle",
+                   ],
+                   default=None,
+                   help="Optional validation audio prompt mode; defaults to audio_prompt_ref_mode.")
     p.add_argument("--audio_prompt_dim", type=int, default=0,
                    help="Dimension of each audio prompt token; usually 512 for Mimi latent.")
     p.add_argument("--audio_prompt_pool_cond", action="store_true",
@@ -1152,6 +1163,7 @@ def main():
     )
     if args.val_clip_list:
         train_ds = ds
+        val_audio_prompt_ref_mode = args.val_audio_prompt_ref_mode or args.audio_prompt_ref_mode
         val_ds = FMAVSRDataset(
             args.data_root, args.split, subset="train",
             limit=limit, clip_list=args.val_clip_list,
@@ -1160,7 +1172,7 @@ def main():
             visual_feature_name=args.visual_feature_name,
             timbre_condition_name=args.timbre_condition_name,
             audio_prompt_frames=args.audio_prompt_frames,
-            audio_prompt_ref_mode=args.audio_prompt_ref_mode,
+            audio_prompt_ref_mode=val_audio_prompt_ref_mode,
             load_energy=mode_uses_energy_supervision(args.energy_condition_mode),
         )
         train_n = len(train_ds)
