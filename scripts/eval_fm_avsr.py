@@ -225,6 +225,8 @@ def parse_args():
                    help="Random seed for the noisy token used with --use_denoise.")
     p.add_argument("--condition_shift", type=int, default=0,
                    help="Use clip i+shift as video/text/speaker condition while decoding GT clip i. 0 disables.")
+    p.add_argument("--audio_prompt_condition_shift", type=int, default=0,
+                   help="Use clip i+shift as audio prompt source independently from video/text/speaker conditions.")
     p.add_argument("--metrics_json", default=None,
                    help="Optional path to save per-clip normalized latent corr/MSE/MAE metrics.")
     p.add_argument("--metrics_only", action="store_true",
@@ -248,7 +250,7 @@ def parse_args():
                        "audio_prompt_frames", "audio_prompt_name", "audio_prompt_dim", "audio_prompt_pool_cond",
                        "audio_prompt_stat_pool_cond", "audio_prompt_learned_pool_cond",
                        "no_audio_prompt_cross_attn", "audio_prompt_cross_attn_pool",
-                       "audio_prompt_cross_attn_pool_tokens",
+                       "audio_prompt_cross_attn_pool_tokens", "audio_prompt_condition_shift",
                        "ctc_condition_mode", "auto_avsr_ckpt", "ctc_vocab_size",
                        "ctc_topk", "ctc_token_emb_dim", "energy_condition_mode",
                        "residual_base_ckpt", "allow_partial_resume",
@@ -377,6 +379,24 @@ def latent_metrics(pred: np.ndarray, target: np.ndarray, start_frame: int = 0) -
         "corr": corr,
         "mse": float(np.mean(diff * diff)),
         "mae": float(np.mean(np.abs(diff))),
+    }
+
+
+def prefix_copy_metrics(
+    pred: np.ndarray,
+    target: np.ndarray,
+    prompt: np.ndarray | None,
+    frames: int,
+) -> dict:
+    frames = max(int(frames), 0)
+    if frames <= 0 or prompt is None:
+        return {"prefix_target_corr": 0.0, "prefix_prompt_corr": 0.0}
+    n = min(frames, pred.shape[0], target.shape[0], prompt.shape[0])
+    if n <= 0:
+        return {"prefix_target_corr": 0.0, "prefix_prompt_corr": 0.0}
+    return {
+        "prefix_target_corr": latent_metrics(pred[:n], target[:n])["corr"],
+        "prefix_prompt_corr": latent_metrics(pred[:n], prompt[:n])["corr"],
     }
 
 
@@ -548,6 +568,7 @@ def main():
     with torch.no_grad():
         for i, c in enumerate(clips):
             cond_c = shifted_condition_clip(clips, i, args.condition_shift)
+            prompt_c = shifted_condition_clip(clips, i, args.audio_prompt_condition_shift)
             enc = np.load(str(cond_c / args.visual_feature_name)).astype("float32")   # (T, 768)
             lat_gt = np.load(str(c / "latent.npz"))["latent"].astype("float32")  # (T_a, 512)
             target_enc = np.load(str(c / args.visual_feature_name)).astype("float32")
@@ -558,20 +579,23 @@ def main():
                 timbre = np.load(str(cond_c / args.timbre_condition_name)).astype("float32")
                 timbre_t = torch.from_numpy(timbre).to(device, dtype=torch.bfloat16).unsqueeze(0)
             audio_prompt = None
+            prompt_norm_np = None
             if args.audio_prompt_frames > 0:
                 prompt_np = np.zeros(
                     (args.audio_prompt_frames, 512), dtype=np.float32
                 )
                 if args.audio_prompt_name:
-                    loaded_prompt = np.load(str(cond_c / args.audio_prompt_name)).astype("float32")
+                    loaded_prompt = np.load(str(prompt_c / args.audio_prompt_name)).astype("float32")
                     n_prompt = min(args.audio_prompt_frames, loaded_prompt.shape[0])
                     prompt_np[:n_prompt, :loaded_prompt.shape[1]] = loaded_prompt[:n_prompt]
                 else:
-                    cond_lat = np.load(str(cond_c / "latent.npz"))["latent"].astype("float32")
-                    cond_lat = validate_latent_frame_rate(cond_lat, enc.shape[0], cond_c)
+                    prompt_enc = np.load(str(prompt_c / args.visual_feature_name)).astype("float32")
+                    cond_lat = np.load(str(prompt_c / "latent.npz"))["latent"].astype("float32")
+                    cond_lat = validate_latent_frame_rate(cond_lat, prompt_enc.shape[0], prompt_c)
                     cond_lat = normalize_latent(cond_lat)
                     n_prompt = min(args.audio_prompt_frames, cond_lat.shape[0])
                     prompt_np[:n_prompt, :cond_lat.shape[1]] = cond_lat[:n_prompt]
+                prompt_norm_np = prompt_np
                 audio_prompt = torch.from_numpy(prompt_np).to(
                     device, dtype=torch.bfloat16
                 ).unsqueeze(0)
@@ -761,14 +785,23 @@ def main():
                 pred_norm_np, target_norm_np,
                 start_frame=args.metric_start_frame,
             )
+            copy_metrics = prefix_copy_metrics(
+                pred_norm_np,
+                target_norm_np,
+                prompt_norm_np,
+                args.audio_prompt_frames,
+            )
             metrics_rows.append({
                 "index": i,
                 "target_clip": str(c),
                 "condition_clip": str(cond_c),
+                "audio_prompt_clip": str(prompt_c),
                 "condition_shift": int(args.condition_shift),
+                "audio_prompt_condition_shift": int(args.audio_prompt_condition_shift),
                 "metric_start_frame": int(args.metric_start_frame),
                 "T_a": int(T_a),
                 **row_metrics,
+                **copy_metrics,
             })
 
             if not args.metrics_only:
@@ -789,10 +822,13 @@ def main():
         summary = {
             "n": len(metrics_rows),
             "condition_shift": int(args.condition_shift),
+            "audio_prompt_condition_shift": int(args.audio_prompt_condition_shift),
             "metric_start_frame": int(args.metric_start_frame),
             "mean_corr": float(np.mean([r["corr"] for r in metrics_rows])) if metrics_rows else 0.0,
             "mean_mse": float(np.mean([r["mse"] for r in metrics_rows])) if metrics_rows else 0.0,
             "mean_mae": float(np.mean([r["mae"] for r in metrics_rows])) if metrics_rows else 0.0,
+            "mean_prefix_target_corr": float(np.mean([r["prefix_target_corr"] for r in metrics_rows])) if metrics_rows else 0.0,
+            "mean_prefix_prompt_corr": float(np.mean([r["prefix_prompt_corr"] for r in metrics_rows])) if metrics_rows else 0.0,
             "clips": metrics_rows,
         }
         metrics_path = Path(args.metrics_json)

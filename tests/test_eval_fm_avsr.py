@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import numpy as np
 import torch
 
-from scripts.eval_fm_avsr import latent_metrics, shifted_condition_clip
+from scripts.eval_fm_avsr import latent_metrics, prefix_copy_metrics, shifted_condition_clip
 from scripts import eval_fm_avsr
 from streaminlip.fm_avsr_dataset import normalize_latent, set_norm_stats_path
 
@@ -47,6 +47,16 @@ class EvalFMAVSRTest(unittest.TestCase):
 
         self.assertAlmostEqual(metrics["mse"], 0.0)
         self.assertAlmostEqual(metrics["corr"], 1.0)
+
+    def test_prefix_copy_metrics_compares_prediction_to_target_and_prompt(self):
+        pred = np.array([[1.0], [2.0], [3.0], [9.0]], dtype=np.float32)
+        target = np.array([[1.0], [2.0], [3.0], [0.0]], dtype=np.float32)
+        prompt = np.array([[3.0], [2.0], [1.0]], dtype=np.float32)
+
+        metrics = prefix_copy_metrics(pred, target, prompt, frames=3)
+
+        self.assertAlmostEqual(metrics["prefix_target_corr"], 1.0, places=6)
+        self.assertAlmostEqual(metrics["prefix_prompt_corr"], -1.0, places=6)
 
     def test_slice_latent_for_wav_output_skips_prompt_frames(self):
         lat = np.arange(5 * 2, dtype=np.float32).reshape(5, 2)
@@ -209,6 +219,25 @@ class EvalFMAVSRTest(unittest.TestCase):
             sys.argv = old_argv
 
         self.assertEqual(args.audio_prompt_cross_attn_pool_tokens, 4)
+
+    def test_parse_args_loads_audio_prompt_condition_shift_from_config(self):
+        old_argv = sys.argv
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".yaml") as f:
+                f.write("audio_prompt_condition_shift: 1\n")
+                f.flush()
+                sys.argv = [
+                    "scripts/eval_fm_avsr.py",
+                    "--config",
+                    f.name,
+                    "--ckpt",
+                    "dummy.pt",
+                ]
+                args = eval_fm_avsr.parse_args()
+        finally:
+            sys.argv = old_argv
+
+        self.assertEqual(args.audio_prompt_condition_shift, 1)
 
     def test_parse_args_prefers_val_clip_list_from_train_config(self):
         old_argv = sys.argv

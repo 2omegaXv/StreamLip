@@ -971,3 +971,63 @@ complete proof that prompt-copying is fixed. It is, however, the strongest
 candidate so far for preserving the metric while regularizing prompt-order
 dependence. The next required check is a direct copy-risk/listening diagnostic
 against E2.
+
+Copy-risk diagnostic:
+
+Add `--audio_prompt_condition_shift` to `scripts/eval_fm_avsr.py` so the audio
+prompt can be sourced from clip `i+shift` while video/text/speaker conditions
+remain on clip `i`. This isolates whether the generated prefix follows the
+external prompt content. With `audio_prompt_condition_shift=1`,
+`metric_start_frame=0`, and `n=200`:
+
+| Model | mean_corr vs target | prefix_target_corr | prefix_prompt_corr |
+| --- | ---: | ---: | ---: |
+| E2 step 2000 | `0.3059714477` | `0.0382390886` | `0.9584999783` |
+| E21 step 2250 | `0.3059706628` | `0.0382069377` | `0.9584930963` |
+
+Conclusion:
+
+Train-time prompt shuffling does not materially reduce prefix prompt copying.
+When the prompt is shifted to the next clip, both E2 and E21 generate a prefix
+that correlates very strongly with the shifted prompt and weakly with the target
+prefix. E21 is therefore a metric-preserving regularization candidate, but not a
+solution to the prompt-copy bug.
+
+### E22: Audio-Prompt-Only Shift Diagnostic
+
+Hypothesis:
+
+If E21 really reduces prompt-content dependence, replacing only the audio prompt
+with the next validation clip's prompt should hurt E21 less than E2. This keeps
+video, text, speaker embedding, and timbre condition from the target clip, and
+changes only `audio_prompt`.
+
+Implementation:
+
+- use eval-only `audio_prompt_condition_shift: 1`;
+- keep `condition_shift: 0`;
+- run latent metrics only on the same 1000 validation clips;
+- compute metrics from frame 38 onward.
+
+Commands:
+
+```text
+scripts/eval_fm_avsr.py --config configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml --ckpt runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt --use_recon --metrics_only --n 1000 --audio_prompt_condition_shift 1 --output_dir eval_out/prompt_shift_e2_val1000 --metrics_json eval_out/prompt_shift_e2_val1000/metrics.json
+
+scripts/eval_fm_avsr.py --config configs/fm_avsr_lipavsr_59144_timbre3s_trainshuffle_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml --ckpt runs/fm_avsr/lipavsr_59144_timbre3s_trainshuffle_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1/step_002250.pt --use_recon --metrics_only --n 1000 --audio_prompt_condition_shift 1 --output_dir eval_out/prompt_shift_e21_val1000 --metrics_json eval_out/prompt_shift_e21_val1000/metrics.json
+```
+
+Result:
+
+| Run | normal prefix val corr | shifted-prompt mean_corr | drop |
+| --- | ---: | ---: | ---: |
+| E2 temporal prompt | `0.58434393` | `0.50780876` | `0.07653517` |
+| E21 train-shuffle / val-prefix | `0.58433182` | `0.50783524` | `0.07649658` |
+
+Conclusion:
+
+E21 does not materially reduce dependence on the audio prompt. The shifted-prompt
+drop is essentially the same as E2; the difference is only about `2.6e-5` in
+mean corr. E21 is a metric-preserving augmentation, but not a verified fix for
+prompt copying or speaker-content leakage. The current success criteria are
+therefore still unmet.
