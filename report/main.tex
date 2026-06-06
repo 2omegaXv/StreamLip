@@ -199,7 +199,7 @@ latent space, not waveform space.
 
 \subsection{Text and Timbre Conditions}
 
-Text is encoded by SmolLM2 into hidden states. For LRS3 validation with
+Text is encoded by SmolLM2~\cite{benallal2025smollm2} into hidden states. For LRS3 validation with
 ground-truth word timestamps, audio-latent frames are aligned to text positions
 using word timestamps. For raw videos, timestamps are unavailable, so the hidden
 states are uniformly resampled. This makes text usable even when it is not
@@ -700,6 +700,12 @@ Aida Nematzadeh, Sahand Sharifi, Miko{\l}aj Bi{\'n}kowski, Ricardo Barreira,
 Oriol Vinyals, Andrew Zisserman, and Karen Simonyan.
 \newblock Flamingo: a visual language model for few-shot learning.
 \newblock In \emph{Advances in Neural Information Processing Systems}, 2022.
+
+\bibitem[Ben~Allal et~al.(2025)]{benallal2025smollm2}
+Loubna Ben~Allal, Anton Lozhkov, Elie Bakouch, Gabriel Mart{\'i}n Bl{\'a}zquez,
+Lewis Tunstall, Agust{\'i}n Piqueres, et~al.
+\newblock {SmolLM2}: A family of small language models.
+\newblock \emph{arXiv preprint arXiv:2502.02737}, 2025.
 
 \bibitem[D{\'e}fossez et~al.(2024)]{defossez2024moshi}
 Alexandre D{\'e}fossez, Laurent Mazar{\'e}, Manu Orsini, Am{\'e}lie Royer,
