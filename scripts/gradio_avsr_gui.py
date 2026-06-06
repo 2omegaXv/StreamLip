@@ -349,11 +349,11 @@ def build_app() -> gr.Blocks:
                 with gr.Accordion("⚙️ 高级参数", open=False):
                     fa_device        = gr.Textbox(label="fa_device",     value="cuda:0")
                     size             = gr.Number( label="缩放尺寸 (px)", value=224, precision=0)
-                    mimi_path        = gr.Textbox(label="Mimi",          value=str(REPO_ROOT / "ckpt/mimi"))
-                    smollm2_path     = gr.Textbox(label="SmolLM2",       value=str(REPO_ROOT / "ckpt/smollm2-360m"))
-                    auto_avsr_ckpt   = gr.Textbox(label="Auto-AVSR ckpt",value=str(REPO_ROOT / "ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth"))
-                    resnet50_weights = gr.Textbox(label="ResNet50 权重", value=str(REPO_ROOT / "ckpt/speaker/resnet50-11ad3fa6.pth"))
-                    norm_stats       = gr.Textbox(label="Norm stats",    value=str(REPO_ROOT / "ckpt/norm/latent_norm_stats.npz"))
+                    mimi_path        = gr.Textbox(label="Mimi",          value="ckpt/mimi")
+                    smollm2_path     = gr.Textbox(label="SmolLM2",       value="ckpt/smollm2-360m")
+                    auto_avsr_ckpt   = gr.Textbox(label="Auto-AVSR ckpt",value="ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth")
+                    resnet50_weights = gr.Textbox(label="ResNet50 权重", value="ckpt/speaker/resnet50-11ad3fa6.pth")
+                    norm_stats       = gr.Textbox(label="Norm stats",    value="ckpt/norm/latent_norm_stats.npz")
                     config_path      = gr.Textbox(label="Config yaml",   value=DEFAULT_CONFIG)
                     ckpt_path        = gr.Textbox(label="Checkpoint",    value=DEFAULT_CKPT)
 
