@@ -79,14 +79,22 @@ class AutoAVSRInferencer(nn.Module):
         Accepts:
           (T, 3, 96, 96) float32  — ImageNet-normalized RGB
           (T, 96, 96, 3) uint8    — raw RGB from lip.npy
+          (T, 96, 96) uint8       — grayscale frames from lip_avsr.npy
 
         Returns:
           (T, 1, 88, 88) float32  — grayscale, Auto-AVSR normalized
         """
         if frames.dtype == torch.uint8:
-            # raw uint8 (T, H, W, C) → (T, C, H, W) float [0,1]
+            # raw uint8 RGB (T, H, W, C) or grayscale (T, H, W) -> float [0,1]
             frames = frames.float() / 255.0
-            frames = frames.permute(0, 3, 1, 2)  # (T, 3, H, W)
+            if frames.ndim == 3:
+                frames = frames.unsqueeze(1)  # (T, 1, H, W)
+            elif frames.ndim == 4 and frames.shape[-1] == 3:
+                frames = frames.permute(0, 3, 1, 2)  # (T, 3, H, W)
+            elif frames.ndim == 4 and frames.shape[1] == 1:
+                pass
+            else:
+                raise ValueError(f"unsupported uint8 lip frame shape: {tuple(frames.shape)}")
         else:
             # ImageNet-normalized (T, 3, 96, 96) → undo normalization → [0,1]
             mean = torch.tensor([0.485, 0.456, 0.406], device=frames.device).view(1, 3, 1, 1)
@@ -94,11 +102,16 @@ class AutoAVSRInferencer(nn.Module):
             frames = frames * std + mean  # (T, 3, 96, 96) in [0,1]
 
         # CenterCrop 88×88
-        frames = TF.center_crop(frames, [88, 88])  # (T, 3, 88, 88)
+        frames = TF.center_crop(frames, [88, 88])  # (T, C, 88, 88)
 
-        # Grayscale: weighted average
-        frames = 0.2126 * frames[:, 0] + 0.7152 * frames[:, 1] + 0.0722 * frames[:, 2]
-        frames = frames.unsqueeze(1)  # (T, 1, 88, 88)
+        if frames.shape[1] == 1:
+            frames = frames[:, :1]
+        elif frames.shape[1] == 3:
+            # Grayscale: weighted average
+            frames = 0.2126 * frames[:, 0] + 0.7152 * frames[:, 1] + 0.0722 * frames[:, 2]
+            frames = frames.unsqueeze(1)  # (T, 1, 88, 88)
+        else:
+            raise ValueError(f"unsupported channel count after crop: {frames.shape[1]}")
 
         # Auto-AVSR normalization
         frames = (frames - self.AVSR_MEAN) / self.AVSR_STD

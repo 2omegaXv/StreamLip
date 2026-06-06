@@ -1,0 +1,45 @@
+data_root: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed
+mimi_path: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/mimi
+smollm2_path: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/smollm2-360m
+output_dir: runs/fm_avsr
+run_name: lipavsr_1000_pred_energy_recon_textjson_wordts_v1
+split: pretrain
+clip_list: configs/eval_splits/pretrain_lipavsr_train1000_seed44_excl_val1000_seed43.txt
+val_clip_list: configs/eval_splits/pretrain_len80_260_lipavsr_val1000_seed43.txt
+resume_ckpt: null
+
+batch_size: 64
+num_workers: 8
+val_clips: 0
+crop_ta: 0
+
+condition_mode: both
+text_source: text_json
+text_alignment_mode: word_timestamps
+visual_feature_name: avsr_enc_lipavsr.npy
+ctc_condition_mode: none
+energy_condition_mode: pred
+metric_start_frame: 38
+
+n_dit_layers: 6
+use_cross_attn: false
+use_text_token_cross_attn: false
+
+lr: 0.0003
+lr_schedule: fixed
+warmup_epochs: 0.0
+max_epochs: 10000
+max_steps: 1500
+eval_every: 500
+save_every: 500
+
+loss_fm_weight: 0.0
+lambda_recon: 1.0
+lambda_energy: 0.1
+lambda_sample_recon: 0.0
+lambda_denoise: 0.0
+sample_recon_nfe: 4
+eval_sample_nfe: 0
+
+no_wandb: true
+debug: false

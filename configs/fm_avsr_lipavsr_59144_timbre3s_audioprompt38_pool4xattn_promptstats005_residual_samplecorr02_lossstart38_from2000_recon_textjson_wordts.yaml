@@ -1,0 +1,55 @@
+data_root: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed
+mimi_path: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/mimi
+smollm2_path: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/smollm2-360m
+output_dir: runs/fm_avsr
+run_name: lipavsr_59144_timbre3s_audioprompt38_pool4xattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+split: pretrain
+clip_list: configs/eval_splits/pretrain_lipavsr_train59144_seed44_plus_ready_remaining9144_excl_val1000_seed43.txt
+val_clip_list: configs/eval_splits/pretrain_len80_260_lipavsr_val1000_seed43.txt
+resume_ckpt: runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt
+residual_base_ckpt: runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_from4000_recon_textjson_wordts_v1/step_005000.pt
+
+batch_size: 64
+num_workers: 8
+val_clips: 0
+crop_ta: 0
+
+condition_mode: both
+text_source: text_json
+text_alignment_mode: word_timestamps
+visual_feature_name: avsr_enc_lipavsr.npy
+timbre_condition_name: timbre_cond.npy
+timbre_condition_dim: 1024
+audio_prompt_frames: 38
+audio_prompt_dim: 512
+audio_prompt_pool_cond: true
+audio_prompt_cross_attn_pool_tokens: 4
+ctc_condition_mode: none
+energy_condition_mode: pred
+metric_start_frame: 38
+loss_start_frame: 38
+
+n_dit_layers: 6
+use_cross_attn: true
+use_text_token_cross_attn: false
+
+lr: 0.00001
+lr_schedule: fixed
+warmup_epochs: 0.0
+max_epochs: 10000
+max_steps: 2250
+eval_every: 250
+save_every: 250
+
+loss_fm_weight: 0.0
+lambda_recon: 1.0
+lambda_energy: 0.0
+lambda_sample_recon: 0.0
+lambda_denoise: 0.0
+lambda_sample_corr: 0.2
+lambda_prompt_timbre_stats: 0.05
+sample_recon_nfe: 4
+eval_sample_nfe: 0
+
+no_wandb: true
+debug: false

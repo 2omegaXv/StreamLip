@@ -1,6 +1,6 @@
 """
 StreamLip Dataset — 加载 data/processed/ 格式的预处理数据。
-格式规范见 data/DATA_DESIGN.md。
+旧格式规范归档见 archive/docs_legacy/DATA_DESIGN.md。
 """
 
 import json

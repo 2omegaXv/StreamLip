@@ -1,0 +1,1165 @@
+# FM-AVSR Timbre Fix Experiments - 2026-06-04
+
+## Goal
+
+Fix the current timbre/control problem while keeping validation correlation above
+the historical best. Each experiment must stay under 1 hour. Runs with abnormal
+or clearly weak metrics should be stopped early.
+
+Success criteria:
+
+- reduce the sequence-level prompt-copying path in the model design;
+- keep or improve validation `val_recon_corr` over the current best run;
+- record every experiment here with config, checkpoint, elapsed time, and result;
+- commit key code/config/doc checkpoints.
+
+## Historical Best
+
+The previous report recorded `corr = 0.58184180` from the final text-json eval.
+The local training validation logs show a stronger current baseline:
+
+| Run | Step | val_recon_corr | Notes |
+| --- | ---: | ---: | --- |
+| `lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_from1000_recon_textjson_wordts_v1` | 1500 | `0.58431531` | current best full run |
+| `lipavsr_59144_timbre3s_audioprompt38_pool_residual_ctctopk_from1000_recon_textjson_wordts_v1` | 1500 | `0.58427079` | CTC top-k auxiliary |
+| `lipavsr_59144_timbre3s_audioprompt38_pool_statpool_residual_from1000_recon_textjson_wordts_v1` | 1250 | `0.58426972` | stat-pool enabled, still exposes prompt tokens |
+| `lipavsr_59144_timbre3s_audioprompt38_pool_learnedpool_residual_samplecorr02_from1000_recon_textjson_wordts_v1` | 1500 | `0.58426568` | learned pool enabled, still exposes prompt tokens |
+| `lipavsr_59144_timbre3s_audioprompt38_pool_residual_samplecorr02_from1000_recon_textjson_wordts_v1` | 1500 | `0.58426899` | no prompt-stats loss |
+
+Working threshold for this stage: beat `0.58431531` on the same
+`pretrain_len80_260_lipavsr_val1000_seed43` validation split, not merely the
+older report number.
+
+## Root-Cause Hypothesis
+
+The current timbre condition has two parts:
+
+- fixed/global `timbre_cond.npy = concat(mean(prefix), std(prefix))`;
+- sequence `audio_prompt.npy` with shape `(38, 512)`, about 3.04 seconds of
+  normalized Mimi frames.
+
+Even when `audio_prompt_pool_cond`, `audio_prompt_stat_pool_cond`, or
+`audio_prompt_learned_pool_cond` is enabled, the raw projected prompt sequence is
+still concatenated into cross-attention condition tokens whenever
+`audio_prompt_frames > 0`. This is a direct content-copying route. The model can
+use the prompt as a short audio prefix instead of a speaker-only style
+condition.
+
+First code fix: add `no_audio_prompt_cross_attn` so experiments can keep
+pooled/stat timbre conditioning but hide the raw temporal audio-prompt tokens
+from DiT cross-attention.
+
+## Experiment Log
+
+### E0: Structural No-Prompt-Token Switch
+
+Code change:
+
+- `src/streaminlip/v2/fm_head.py`
+  - adds `audio_prompt_cross_attn` with default `True`;
+  - when disabled, prompt tokens can still affect pooled/stat/learned conditions
+    but are not appended to cross-attention tokens.
+- `scripts/train_fm_avsr.py` and `scripts/eval_fm_avsr.py`
+  - add `no_audio_prompt_cross_attn`.
+
+Verification:
+
+```text
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python -m unittest \
+  tests.test_timbre_condition.TimbreConditionTest.test_audio_prompt_tokens_can_be_excluded_from_cross_attention \
+  tests.test_eval_fm_avsr.EvalFMAVSRTest.test_parse_args_loads_no_audio_prompt_cross_attn_from_config \
+  tests.test_fm_avsr_dataset.FMAVSRDatasetTest.test_parse_args_loads_no_audio_prompt_cross_attn_from_config
+
+Ran 3 tests in 0.161s
+OK
+```
+
+Status: code path ready for training experiments.
+
+### E1: Disable Raw Prompt Cross-Attention, Keep Mean Pool
+
+Planned config:
+
+- start from current best residual config;
+- set `no_audio_prompt_cross_attn: true`;
+- keep `audio_prompt_pool_cond: true`;
+- keep `lambda_sample_corr: 0.2`;
+- do not use `lambda_prompt_timbre_stats` in first pass, because matching the
+  predicted post-prompt latent distribution to the reference prompt may
+  reinforce prompt copying;
+- max 1500 steps, eval every 250, expected runtime under 1 hour.
+
+Early-stop rule:
+
+- stop if validation corr at 500 steps is below `0.5830`;
+- stop immediately on NaN, exploding loss, or severe train/val regression.
+
+Result:
+
+| Step | val_recon_corr | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | --- |
+| 1250 | `0.5646` | not used | under 5 min | early-stopped |
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_nopromptxattn_residual_samplecorr02_from1000_recon_textjson_wordts_v1
+```
+
+Conclusion:
+
+Fully hiding raw prompt tokens removes the prompt-copying route, but it also
+removes a condition that the current checkpoint depends on heavily. This is not
+a viable final direction because it loses about `0.020` validation corr against
+the current best.
+
+### E2: Keep Prompt Tokens, Move Reconstruction Loss After Prompt
+
+Hypothesis:
+
+The direct copying bug is encouraged because training reconstructs the same
+first 38 Mimi frames that are also given as `audio_prompt.npy`. The validation
+metric already skips the first 38 frames, but the main reconstruction loss still
+starts at frame 0 in the strongest run. Setting `loss_start_frame: 38` keeps the
+prompt tokens available for speaker/style control while removing the direct
+loss reward for copying the prompt region.
+
+Planned config:
+
+- resume from the current best prompt-stats checkpoint at step 1500;
+- keep raw prompt cross-attention enabled;
+- set `loss_start_frame: 38`;
+- keep `metric_start_frame: 38`;
+- train only 500 additional steps, max runtime under 1 hour;
+- early-stop if the 1750-step validation corr drops below `0.5830`.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1
+```
+
+Training-validation result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1750 | `0.58433689` | `0.64905658` | `0.59181344` | `0.60431403` | `184.35 s` |
+| 2000 | `0.58434393` | `0.64904572` | `0.59179956` | `0.61712486` | `353.11 s` |
+
+Checkpoint:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt
+```
+
+This beats the training-validation historical best `0.58431531` by
+`+0.00002862` on the same validation split. It also reduces the apparent
+train/val overfit gap: the previous best had `train_recon_corr = 0.75502914`,
+while E2 has `train_recon_corr = 0.61712486` at its best checkpoint.
+
+Metrics-only eval on 1000 clips with the same eval script:
+
+| Model | corr | mse | mae | metric_start_frame |
+| --- | ---: | ---: | ---: | ---: |
+| previous best step 1500 | `0.58184180` | `0.66763106` | `0.60181897` | `38` |
+| E2 loss_start_frame=38 step 2000 | `0.58186685` | `0.66760399` | `0.60178062` | `38` |
+
+Eval command:
+
+```text
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml \
+  --ckpt runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt \
+  --use_recon --metrics_only --n 1000 \
+  --output_dir eval_out/timbre_fix_e2_lossstart38_val1000 \
+  --metrics_json eval_out/timbre_fix_e2_lossstart38_val1000/metrics.json
+```
+
+Conclusion:
+
+E2 is the current best quantitative checkpoint. It does not remove the temporal
+audio-prompt condition, so it is not a full architectural fix for speaker-only
+timbre. It does remove the direct training reward for reconstructing the same
+first 3.04 seconds that are supplied as `audio_prompt.npy`, and it keeps
+validation correlation above the historical best. For listening exports, the
+first 3.04 seconds should still be cropped until a fixed-size speaker-only
+timbre condition or random-reference/dropout training is implemented.
+
+Trump silent-reference listening check:
+
+The E2 checkpoint was run on the existing preprocessed Trump silent-reference
+demo to avoid reintroducing face/AVSR preprocessing variability. The output
+keeps the same post-prompt export convention, so the first 3.04 seconds are
+cropped from the visible/listenable MP4.
+
+```text
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml \
+  --ckpt runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt \
+  --data_root eval_out/trump_silent_ref_demo_full/processed \
+  --clip_list eval_out/trump_silent_ref_demo_full/clip_list.txt \
+  --text_source lipavsr --text_alignment_mode uniform \
+  --output_dir eval_out/trump_silent_ref_demo_full_e2_lossstart38/recon_lipavsr_prompt3s \
+  --n 1 --use_recon --audio_prompt_name audio_prompt.npy \
+  --wav_start_frame 38 --metric_start_frame 38 \
+  --metrics_json eval_out/trump_silent_ref_demo_full_e2_lossstart38/recon_lipavsr_prompt3s/metrics.json
+```
+
+Artifacts:
+
+```text
+eval_out/trump_silent_ref_demo_full_e2_lossstart38/recon_lipavsr_prompt3s/0000_pred.wav
+eval_out/trump_silent_ref_demo_full_e2_lossstart38/trump_silent_ref_demo_full_e2_lossstart38_pred_post3s.mp4
+```
+
+The muxed MP4 duration is `23.52 s`, matching the existing full silent-ref
+demo after removing the first `3.04 s` prompt region.
+
+### E3: Pooled Prompt Token for Cross-Attention
+
+Hypothesis:
+
+E1 showed that removing audio-prompt cross-attention entirely loses too much
+correlation. E3 keeps a prompt cross-attention path but replaces the temporal
+`(38, 512)` prompt-token sequence with one mean-pooled prompt token. This
+reduces the sequence-level content-copying path while preserving a style-like
+reference token.
+
+Code/config:
+
+- `src/streaminlip/v2/fm_head.py`
+  - adds `audio_prompt_cross_attn_pool`;
+  - when enabled, DiT cross-attention sees only
+    `mean(audio_prompt_proj(audio_prompt), dim=time)` as one token.
+- `scripts/train_fm_avsr.py` and `scripts/eval_fm_avsr.py`
+  - add CLI/config support for `audio_prompt_cross_attn_pool`.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_poolxattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_poolxattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.56620605` | `0.66995936` | `0.60439114` | `0.57895392` | `182.76 s` | stop |
+
+Conclusion:
+
+This confirms the current high-corr checkpoint still depends on temporal
+audio-prompt cross-attention. Pooling the prompt token is conceptually cleaner
+for timbre control but causes a large validation drop (`-0.0181` versus E2).
+Therefore E3 is not a deployable final model. The final checkpoint for now
+remains E2, with first-3.04s export cropping and the documented limitation that
+the prompt representation is not yet a pure speaker embedding.
+
+### E4: Disable Prompt Cross-Attention at E2 Evaluation Only
+
+Hypothesis:
+
+Maybe the checkpoint only needs raw prompt tokens during training, and inference
+can remove them while preserving the learned frame/global timbre condition.
+This would be an immediate deploy-time fix for prompt content leakage.
+
+Eval command:
+
+```text
+/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python scripts/eval_fm_avsr.py \
+  --config configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml \
+  --ckpt runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt \
+  --use_recon --metrics_only --n 1000 --no_audio_prompt_cross_attn \
+  --output_dir eval_out/timbre_fix_e4_e2_no_promptxattn_eval_val1000 \
+  --metrics_json eval_out/timbre_fix_e4_e2_no_promptxattn_eval_val1000/metrics.json
+```
+
+Result:
+
+| Eval mode | corr | mse | mae | Decision |
+| --- | ---: | ---: | ---: | --- |
+| E2 normal | `0.58186685` | `0.66760399` | `0.60178062` | keep |
+| E2 eval-only no prompt x-attn | `0.55201229` | `0.70036560` | `0.62153375` | reject |
+
+Conclusion:
+
+Inference also depends on raw temporal prompt tokens. A deploy-time switch that
+removes prompt cross-attention is not viable. This strengthens the diagnosis:
+the present best checkpoint uses prompt sequence information as a strong
+condition, not just as speaker identity. The practical handoff remains E2 with
+post-prompt export cropping; a true fix requires retraining around a
+speaker-only/fixed-size timbre embedding or randomized reference-window
+training that prevents prompt-content copying.
+
+### E5: Same-Parent Reference Prompt During Training
+
+Hypothesis:
+
+Most training clips have another clip under the same `pretrain/<video_id>/`
+parent (`59035/59144` training clips are in multi-clip parents). Using a
+same-parent neighbor as the audio prompt should preserve rough speaker/session
+style while breaking the exact equality between the prompt and the target
+opening content.
+
+Code/config:
+
+- `FMAVSRDataset(audio_prompt_ref_mode="same_parent_next")`
+  - default `self_prefix` keeps previous behavior;
+  - `same_parent_next` loads the prompt latent from the next clip under the same
+    parent directory, falling back to self for singletons.
+- `scripts/train_fm_avsr.py`
+  - adds `--audio_prompt_ref_mode`.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_sameparentprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_sameparentprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.57217276` | `0.66357255` | `0.59945439` | `0.58781838` | `180.90 s` | stop |
+
+Conclusion:
+
+Using a same-parent reference prompt is cleaner than same-clip prefix prompting,
+but it still drops far below E2. This is another negative result: the current
+checkpoint cannot be converted into a speaker-only/timbre-only prompt model by
+short fine-tuning from E2. The deployable checkpoint remains E2, and a true
+speaker-only solution likely needs longer training with randomized references
+from the start or a separate pretrained speaker/timbre encoder.
+
+### E6: Fine-Tune E2 With Prompt Cross-Attention Disabled
+
+Hypothesis:
+
+E4 showed a direct eval-time removal of raw prompt cross-attention drops corr to
+`0.5520`. A short fine-tune from E2 might migrate the useful speaker/style
+information into `audio_prompt_pool_cond` and `timbre_cond` while removing the
+sequence-level content-copy route.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_nopromptxattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_nopromptxattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.56430187` | `0.67164683` | `0.60580907` | `0.58734846` | `184.49 s` | stop |
+
+Conclusion:
+
+Short fine-tuning cannot recover the E2 score after removing raw prompt
+cross-attention. This repeats the E1/E4 conclusion with a stronger
+initialization and lower LR: the current high-corr model uses temporal prompt
+tokens as a major condition, not only as pooled speaker statistics.
+
+### E7: Same-Clip Non-Prefix Prompt Window
+
+Hypothesis:
+
+The practical silent-ref workflow often uses an unmasked segment from the same
+video, not necessarily the target opening. Training with a same-clip non-prefix
+window should preserve speaker/session information while breaking the direct
+copying path for the first 3.04 s. The dataset mode
+`audio_prompt_ref_mode=self_random_window` currently takes a deterministic
+post-prefix window starting at frame 38 when the clip is long enough, falling
+back to the prefix for short clips.
+
+Code/config:
+
+- `FMAVSRDataset(audio_prompt_ref_mode="self_random_window")`
+  - uses the same clip as reference;
+  - starts the prompt window at frame 38 when possible;
+  - keeps shape `(audio_prompt_frames, 512)`.
+- `scripts/train_fm_avsr.py`
+  - accepts the new ref mode from CLI/config.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selfwindowprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selfwindowprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.57978476` | `0.65472100` | `0.59459168` | `0.60845828` | `158.70 s` | stop |
+
+Conclusion:
+
+This is the best prompt-cleaning direction so far: it is much closer to E2 than
+pooled-only, no-prompt-cross-attn, or same-parent prompting. However, it still
+drops about `0.0046` validation corr versus E2 (`0.58434393`) and therefore
+does not satisfy the current success gate. The result suggests that same-video
+non-prefix prompt training is worth a longer run or from-scratch schedule, but
+the current short adaptation is not enough to claim the timbre issue is fixed
+while beating the historical best.
+
+### E8: Continue Same-Clip Non-Prefix Prompt Fine-Tuning
+
+Hypothesis:
+
+E7 was close enough to E2 that the main issue might be adaptation time. Continue
+from E7 step 2250 for one more 250-step interval, lower LR to `1e-5`, and check
+whether validation corr recovers toward or above the historical best.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selfwindowprompt_promptstats005_residual_samplecorr02_lossstart38_from2250_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selfwindowprompt_promptstats005_residual_samplecorr02_lossstart38_from2250_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2500 | `0.58000703` | `0.65450473` | `0.59448284` | `0.59605795` | `189.17 s` | stop |
+
+Conclusion:
+
+Continuing the same-window adaptation only improves E7 by `0.00022` corr and
+still remains below E2/historical best by about `0.0043`. This is not enough to
+claim a fixed timbre prompt route. The evidence now says short fine-tuning from
+E2 can partially adapt to a non-prefix same-video reference, but preserving the
+historical-best corr likely requires training this data regime from earlier in
+the schedule or replacing the temporal prompt with a dedicated speaker-only
+encoder.
+
+### E9: Same-Clip Late Prompt Window
+
+Hypothesis:
+
+E7 used frame 38 as the non-prefix prompt start. That avoids the original first
+3.04 s prompt, but it overlaps the beginning of the post-prompt metric/export
+region. To test whether E7 still benefits from copying content at the evaluated
+start, use `audio_prompt_ref_mode=self_late_window`, which starts at frame 76
+when the clip is long enough.
+
+Code/config:
+
+- `FMAVSRDataset(audio_prompt_ref_mode="self_late_window")`
+  - uses the same clip as reference;
+  - starts the prompt window at frame 76 when possible;
+  - falls back to the latest valid window for shorter clips.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.57805809` | `0.65669878` | `0.59545891` | `0.57842845` | `187.46 s` | stop |
+
+Conclusion:
+
+Late-window prompting is below E7/E8 and remains well below E2. This supports
+the caveat that E7's stronger score may still include some post-crop content
+copying because its prompt starts exactly where the metric/export starts. The
+cleaner same-clip reference direction is still useful diagnostically, but the
+current temporal prompt representation has not been fixed without sacrificing
+validation corr.
+
+### E10: Continue Same-Clip Late Prompt Fine-Tuning
+
+Hypothesis:
+
+E9 is cleaner than E7 but lower. Continue from E9 for one more 250-step
+interval with LR `1e-5` to test whether the cleaner late-window condition only
+needs more adaptation time.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from2250_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from2250_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2500 | `0.57830043` | `0.65645907` | `0.59535372` | `0.58822912` | `170.11 s` | stop |
+
+Conclusion:
+
+Continuing the cleaner late-window route barely changes validation corr
+(`+0.00024` over E9) and remains about `0.0060` below E2. This closes the short
+fine-tuning branch for now: cleaner temporal references reduce prompt leakage
+risk, but they do not preserve the historical-best corr when adapted from the
+current E2 checkpoint. A real fix likely needs a training run that uses
+randomized/late references from the start or a dedicated speaker-only embedding
+that is independent of utterance timing.
+
+### E11: Earlier Switch to Same-Clip Late Prompt
+
+Hypothesis:
+
+E9/E10 might be low because the model had already specialized to prefix prompt
+content by E2 step 2000. Switch earlier, from the E2 predecessor at step 1250,
+to the cleaner `self_late_window` prompt regime and train for 250 steps.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from1250_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from1250_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1500 | `0.57844288` | `0.65622114` | `0.59524856` | `0.57847190` | `179.86 s` | stop |
+
+Conclusion:
+
+Switching to the cleaner late-window prompt earlier does not recover the
+historical-best score. It lands in the same band as E9/E10. This weakens the
+"too late to adapt" hypothesis and points to a more fundamental mismatch: the
+current architecture learns useful content from temporal prompt tokens, and a
+speaker-only route probably needs to be trained as a separate condition rather
+than obtained by short fine-tuning of the prompt-token model.
+
+### E12: Reversed Prefix Prompt Order
+
+Hypothesis:
+
+If the model mainly uses the prompt as an unordered acoustic/timbre reference,
+reversing the first 3.04 s prompt tokens should keep most validation corr while
+reducing direct prefix-copy behavior. If corr drops sharply, the model depends
+on prompt token time order and prompt content, not only on prompt distribution.
+
+Code/config:
+
+- `FMAVSRDataset(audio_prompt_ref_mode="self_prefix_reverse")`
+  - uses the same first `audio_prompt_frames` as the baseline;
+  - reverses the prompt token order before feeding the model.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_revprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_revprompt_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.57178048` | `0.66417245` | `0.59970490` | `0.59282333` | `159.72 s` | stop |
+
+Conclusion:
+
+Reversing the prompt order drops validation corr below the same-parent and
+late-window prompt variants. This is strong evidence that the current model uses
+the temporal order of prompt tokens as meaningful content, not just speaker
+style statistics. Reversed prompt order is not a viable mitigation.
+
+### E13: Earlier Switch From Step 1000 to Same-Clip Late Prompt
+
+Hypothesis:
+
+E11 switched to `self_late_window` from step 1250 and still landed near
+`0.5784`. The model might already depend on prefix prompt content by then. Use
+the earlier predecessor checkpoint at step 1000 and train 250 steps with
+late-window prompt, prompt-stats loss, sample-corr loss, and `loss_start=38`.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from1000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_selflateprompt_promptstats005_residual_samplecorr02_lossstart38_from1000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1250 | `0.57817590` | `0.65641867` | `0.59533750` | `0.58951890` | `180.54 s` | stop |
+
+Conclusion:
+
+Switching to the clean late-window regime from step 1000 does not improve over
+E9/E10/E11. This closes the "switch earlier from a prefix-prompt checkpoint"
+branch for these short experiments. The clean prompt distribution consistently
+lands around `0.578`, while the high-corr E2 path relies on temporal prefix
+prompt content.
+
+### E14: No Prompt Cross-Attention With Mean/Std Stat Pool
+
+Hypothesis:
+
+E6 removed raw prompt cross-attention and only kept mean-pooled prompt
+conditioning, dropping to `0.5643`. Add the existing
+`audio_prompt_stat_pool_cond` path so the model receives fixed-size mean/std
+prompt statistics in the frame condition, still without temporal prompt
+cross-attention. This tests whether richer fixed-size timbre statistics can
+replace the sequence-level prompt content route.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_nopromptxattn_statpool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_nopromptxattn_statpool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.56441507` | `0.67150489` | `0.60568796` | `0.59944201` | `165.66 s` | stop |
+
+Conclusion:
+
+The mean/std stat-pool condition does not recover the no-prompt-cross-attn
+route; it is effectively tied with E6. A fixed-size prompt statistic derived
+inside the current model is not enough. The missing signal is not just mean/std
+speaker style; the high-corr model needs temporal prompt tokens.
+
+### E15: Earlier No Prompt Cross-Attention With Stat Pool
+
+Hypothesis:
+
+E14 might be low because it switches from the already-specialized E2 checkpoint.
+Start from the earlier step-1000 checkpoint and train with no temporal prompt
+cross-attention plus mean/std stat-pool prompt conditioning. This tests whether
+fixed-size prompt statistics need earlier adaptation.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_nopromptxattn_statpool_promptstats005_residual_samplecorr02_lossstart38_from1000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_nopromptxattn_statpool_promptstats005_residual_samplecorr02_lossstart38_from1000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 1250 | `0.56471062` | `0.67105854` | `0.60534329` | `0.59065282` | `193.76 s` | stop |
+
+Conclusion:
+
+Earlier adaptation does not help the no-prompt-cross-attn/stat-pool route. It
+stays in the same band as E6/E14. This rules out the current fixed-stat prompt
+pooling as a short-run substitute for temporal prompt tokens.
+
+### E16: Stronger Prompt Timbre-Stats Loss
+
+Hypothesis:
+
+The clean prompt routes lose too much corr, but E2 already has the best
+objective score. Increase `lambda_prompt_timbre_stats` from `0.05` to `0.20`
+while keeping the E2 temporal prompt architecture, to test whether stronger
+speaker/timbre statistics can improve perceptual timbre without destroying the
+historical-best corr.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats020_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats020_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58389010` | `0.64990659` | `0.59227694` | `0.72652030` | `156.66 s` | stop |
+
+Conclusion:
+
+Increasing the prompt timbre-stat loss to `0.20` keeps the model near E2 but
+drops below both E2 (`0.58434393`) and the historical best (`0.58431531`). It is
+not an acceptable final checkpoint under the current success gate. A milder
+weight is worth testing because this run did not collapse and remains close.
+
+### E17: Milder Prompt Timbre-Stats Loss
+
+Hypothesis:
+
+E16 may have over-regularized the reconstruction objective. Reduce
+`lambda_prompt_timbre_stats` from `0.20` to `0.10` while keeping the E2 temporal
+prompt architecture, to test whether a milder speaker-stat constraint can keep
+the historical-best corr while improving timbre consistency.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats010_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats010_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58430445` | `0.64917718` | `0.59188184` | `0.60478997` | `184.09 s` | stop |
+
+Conclusion:
+
+The milder prompt-stat loss almost ties the historical best but still lands
+below it by about `1.1e-5` and below E2 by about `3.9e-5`. More importantly, it
+keeps the same temporal prompt-token cross-attention path, so it does not
+structurally remove the content-copying risk. Stronger/milder prompt-stat losses
+are not sufficient as the main fix.
+
+### E18: No Prompt Cross-Attention With Learned Prompt Pool
+
+Hypothesis:
+
+Mean/std prompt pooling may be too weak, but the raw temporal prompt-token path
+is the suspected content-copying route. Keep the prompt available only through
+`audio_prompt_pool_cond` and `audio_prompt_learned_pool_cond`, and disable raw
+prompt-token cross-attention with `no_audio_prompt_cross_attn: true`. This tests
+whether a learned fixed-vector speaker summary can replace sequence prompt
+tokens without losing corr.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_nopromptxattn_learnedpool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_nopromptxattn_learnedpool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.56370605` | `0.67225298` | `0.60614244` | `0.58976477` | `190.26 s` | stop |
+
+Conclusion:
+
+The learned fixed-vector prompt summary does not recover the temporal
+prompt-token route. Validation corr drops into the same band as E6/E14/E15,
+while train corr remains much higher. This is a useful negative result: the
+current architecture does not merely need a better pooled speaker vector; it
+uses prompt-token sequence information for validation reconstruction quality.
+The clean no-prompt-token route is still far below the success gate.
+
+### E19: Shuffled Prefix Prompt Tokens
+
+Hypothesis:
+
+If the model only needs an unordered set of speaker/style tokens, shuffling the
+first-38-frame prompt tokens during training should preserve much of the corr
+while weakening direct temporal content copying. If corr drops sharply, prompt
+token order and local temporal content are part of the current reconstruction
+signal.
+
+Code change:
+
+- add `audio_prompt_ref_mode: self_prefix_shuffle`;
+- training dataset still uses the clip prefix tokens, but applies a fresh random
+  permutation before returning `audio_prompt`;
+- the same prompt-token cross-attention architecture is kept, so this isolates
+  the effect of temporal token order from the effect of removing prompt tokens
+  entirely.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_shuffleprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_shuffleprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.57204162` | `0.66379864` | `0.59943147` | `0.60054946` | `173.81 s` | stop |
+
+Conclusion:
+
+Shuffling prompt-token order recovers more corr than removing prompt-token
+cross-attention entirely (`0.5720` vs. `0.5637`) but is still far below E2 and
+the historical best. This confirms the high-corr route is not just a speaker
+token set; ordered/local audio-prompt content contributes substantially. A
+speaker-only fix must either train a stronger dedicated timbre encoder from a
+larger adaptation run or keep the temporal prompt route and mask/crop the copied
+prefix at inference, accepting the current limitation.
+
+### E20: Four Segment-Pooled Prompt Cross-Attention Tokens
+
+Hypothesis:
+
+E18 removed the temporal prompt-token route too aggressively, while E19
+shuffling showed that ordered/local prompt content matters. A middle ground is
+to compress the 38 prompt frames into a small number of segment summary tokens
+before cross-attention. This keeps more prompt detail than a single mean token,
+while preventing the DiT from seeing the full 38-token prompt sequence.
+
+Implementation:
+
+`audio_prompt_cross_attn_pool_tokens: 4` splits the projected prompt sequence
+into four temporal chunks and mean-pools each chunk before concatenating those
+four summary tokens into DiT cross-attention.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool4xattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool4xattn_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.56942006` | `0.66612539` | `0.60174215` | `0.59765899` | `192.86 s` | stop |
+
+Conclusion:
+
+Four segment-pooled prompt tokens recover only a small part of the gap from the
+clean no-prompt-token route, and remain far below E2/historical-best corr. This
+supports the root-cause diagnosis: the current high corr depends strongly on the
+full prompt-token sequence, not only on a compact speaker summary. The
+successful fix likely needs either a stronger speaker encoder with non-temporal
+conditioning, or a training objective that explicitly prevents prompt content
+copying while preserving the full reconstruction signal.
+
+### E21: Train-Time Shuffled Prompt, Validation Prefix Prompt
+
+Hypothesis:
+
+E19 evaluated shuffled prompt tokens at validation time, which is stricter than
+the actual inference interface. A more practical diagnostic is to shuffle the
+prefix prompt only during continued training, while validating with the normal
+ordered prefix prompt. If this keeps corr above the historical best, it may
+reduce sensitivity to prompt order without changing the deployment input.
+
+Implementation:
+
+- add `val_audio_prompt_ref_mode` to `scripts/train_fm_avsr.py`;
+- training dataset uses `audio_prompt_ref_mode: self_prefix_shuffle`;
+- validation dataset uses `val_audio_prompt_ref_mode: self_prefix`;
+- architecture remains the E2 temporal prompt-token path.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_trainshuffle_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_trainshuffle_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58433182` | `0.64906850` | `0.59179682` | `0.59104872` | `217.30 s` | keep candidate |
+
+Conclusion:
+
+This is the first shuffle-based run that remains above the historical-best
+validation corr (`0.58431531`) while using the normal ordered prompt at
+validation time. It is still slightly below E2 (`0.58434393`) and does not
+structurally remove the full prompt-token cross-attention route, so it is not a
+complete proof that prompt-copying is fixed. It is, however, the strongest
+candidate so far for preserving the metric while regularizing prompt-order
+dependence. The next required check is a direct copy-risk/listening diagnostic
+against E2.
+
+Copy-risk diagnostic:
+
+Add `--audio_prompt_condition_shift` to `scripts/eval_fm_avsr.py` so the audio
+prompt can be sourced from clip `i+shift` while video/text/speaker conditions
+remain on clip `i`. This isolates whether the generated prefix follows the
+external prompt content. With `audio_prompt_condition_shift=1`,
+`metric_start_frame=0`, and `n=200`:
+
+| Model | mean_corr vs target | prefix_target_corr | prefix_prompt_corr |
+| --- | ---: | ---: | ---: |
+| E2 step 2000 | `0.3059714477` | `0.0382390886` | `0.9584999783` |
+| E21 step 2250 | `0.3059706628` | `0.0382069377` | `0.9584930963` |
+
+Conclusion:
+
+Train-time prompt shuffling does not materially reduce prefix prompt copying.
+When the prompt is shifted to the next clip, both E2 and E21 generate a prefix
+that correlates very strongly with the shifted prompt and weakly with the target
+prefix. E21 is therefore a metric-preserving regularization candidate, but not a
+solution to the prompt-copy bug.
+
+### E22: Train-Time Audio Prompt Token Dropout
+
+Hypothesis:
+
+Instead of permuting the prompt, randomly zero 50% of audio prompt tokens during
+continued training. Validation and inference still receive the full ordered
+prefix prompt. If the model becomes less reliant on exact prompt content, the
+copy-risk diagnostic should reduce `prefix_prompt_corr` while preserving the
+post-prefix validation corr.
+
+Implementation:
+
+- add `audio_prompt_dropout_prob` to `scripts/train_fm_avsr.py`;
+- dropout is applied only after training-batch `prepare_conditions`;
+- validation remains unchanged.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_promptdrop50_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_promptdrop50_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58432217` | `0.64908975` | `0.59185386` | `0.59465802` | `188.58 s` | keep as diagnostic only |
+
+Copy-risk diagnostic (`audio_prompt_condition_shift=1`, `metric_start_frame=0`,
+`n=200`):
+
+| Model | mean_corr vs target | prefix_target_corr | prefix_prompt_corr |
+| --- | ---: | ---: | ---: |
+| E2 step 2000 | `0.3059714477` | `0.0382390886` | `0.9584999783` |
+| E21 step 2250 | `0.3059706628` | `0.0382069377` | `0.9584930963` |
+| E22 step 2250 | `0.3063568674` | `0.0385381637` | `0.9584760909` |
+
+Conclusion:
+
+Prompt-token dropout preserves the post-prefix validation metric above the
+historical best, but it does not meaningfully reduce prefix copying. The
+generated prefix still follows the shifted audio prompt with corr around
+`0.9585`. Dropout at this level is therefore not a real fix for the timbre
+copying issue.
+
+### E22: Audio-Prompt-Only Shift Diagnostic
+
+Hypothesis:
+
+If E21 really reduces prompt-content dependence, replacing only the audio prompt
+with the next validation clip's prompt should hurt E21 less than E2. This keeps
+video, text, speaker embedding, and timbre condition from the target clip, and
+changes only `audio_prompt`.
+
+Implementation:
+
+- use eval-only `audio_prompt_condition_shift: 1`;
+- keep `condition_shift: 0`;
+- run latent metrics only on the same 1000 validation clips;
+- compute metrics from frame 38 onward.
+
+Commands:
+
+```text
+scripts/eval_fm_avsr.py --config configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml --ckpt runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt --use_recon --metrics_only --n 1000 --audio_prompt_condition_shift 1 --output_dir eval_out/prompt_shift_e2_val1000 --metrics_json eval_out/prompt_shift_e2_val1000/metrics.json
+
+scripts/eval_fm_avsr.py --config configs/fm_avsr_lipavsr_59144_timbre3s_trainshuffle_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml --ckpt runs/fm_avsr/lipavsr_59144_timbre3s_trainshuffle_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1/step_002250.pt --use_recon --metrics_only --n 1000 --audio_prompt_condition_shift 1 --output_dir eval_out/prompt_shift_e21_val1000 --metrics_json eval_out/prompt_shift_e21_val1000/metrics.json
+```
+
+Result:
+
+| Run | normal prefix val corr | shifted-prompt mean_corr | drop | prefix-target corr | prefix-prompt corr |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| E2 temporal prompt | `0.58434393` | `0.50780876` | `0.07653517` | `0.03633958` | `0.95815594` |
+| E21 train-shuffle / val-prefix | `0.58433182` | `0.50783524` | `0.07649658` | `0.03629471` | `0.95814852` |
+
+Conclusion:
+
+E21 does not materially reduce dependence on the audio prompt. The shifted-prompt
+drop is essentially the same as E2; the difference is only about `2.6e-5` in
+mean corr. More directly, after shifting only the prompt, the generated prefix
+correlates with the shifted prompt at about `0.958` and with the true target
+prefix at only about `0.036`, for both E2 and E21. E21 is a metric-preserving
+augmentation, but not a verified fix for prompt copying or speaker-content
+leakage. The current success criteria are therefore still unmet.
+
+### E23: Audio-Prompt Token Dropout 0.50
+
+Hypothesis:
+
+Randomly zeroing prompt tokens during training should make the model less able
+to rely on exact prompt content while still validating with the normal prefix
+prompt.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_promptdrop50_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_promptdrop50_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58432217` | `0.64908975` | `0.59185386` | `0.59465802` | `188.58 s` | weak candidate |
+
+Prompt-shift diagnostic (`n=1000`, `audio_prompt_condition_shift=1`):
+
+| Run | shifted-prompt mean_corr | prefix-target corr | prefix-prompt corr |
+| --- | ---: | ---: | ---: |
+| E23 prompt dropout 0.50 | `0.50838235` | `0.03658937` | `0.95813630` |
+
+Conclusion:
+
+Prompt dropout 0.50 preserves the standard validation metric slightly above the
+historical best, but it does not fix prompt copying. The generated prefix still
+tracks the shifted prompt with corr about `0.958`.
+
+### E24: Same-Parent Prompt Training, Prefix Prompt Validation
+
+Hypothesis:
+
+Training with the next clip from the same parent/speaker as the audio prompt
+should preserve speaker information while making prompt content different from
+the target prefix. Validation still uses the normal `self_prefix` prompt. This
+is a stronger anti-copy augmentation than shuffle/dropout.
+
+Config:
+
+```text
+configs/fm_avsr_lipavsr_59144_timbre3s_sameparenttrain_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts.yaml
+```
+
+Run directory:
+
+```text
+runs/fm_avsr/lipavsr_59144_timbre3s_sameparenttrain_valprefix_promptstats005_residual_samplecorr02_lossstart38_from2000_recon_textjson_wordts_v1
+```
+
+Result:
+
+| Step | val_recon_corr | val_recon_mse | val_recon_mae | train_recon_corr | elapsed | Decision |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| 2250 | `0.58435046` | `0.64912504` | `0.59182436` | `0.58990383` | `168.19 s` | best corr, not fixed |
+
+Prompt-shift diagnostic (`n=1000`, `audio_prompt_condition_shift=1`):
+
+| Run | shifted-prompt mean_corr | prefix-target corr | prefix-prompt corr |
+| --- | ---: | ---: | ---: |
+| E24 same-parent train / prefix val | `0.50850303` | `0.03679529` | `0.95814318` |
+
+Conclusion:
+
+E24 is the highest standard validation corr in this stage and beats both E2
+(`0.58434393`) and the historical best (`0.58431531`). However, the prompt-shift
+diagnostic still shows near-identical prefix copying: the generated prefix
+correlates with the shifted prompt at about `0.958`. E24 improves the metric but
+does not satisfy the timbre/copy-fix requirement.

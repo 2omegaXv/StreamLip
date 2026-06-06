@@ -1,0 +1,26 @@
+data_root: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed
+mimi_path: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/mimi
+output_dir: runs/fm_avsr
+run_name: overfit_12p5hz_sample_recon_03h0dNZoxr8_00024
+split: pretrain
+clip_list: configs/overfit_clip_12p5hz.txt
+
+batch_size: 1
+num_workers: 0
+val_clips: 0
+
+no_text_cond: false
+n_dit_layers: 6
+
+lr: 0.0003
+warmup_epochs: 10.0
+max_epochs: 5000
+eval_every: 1000000
+save_every: 1000
+
+lambda_recon: 1.0
+lambda_sample_recon: 0.1
+sample_recon_nfe: 4
+
+no_wandb: true
+debug: false

@@ -16,6 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 CHUNK_SIZE = 6   # 240ms @ 25fps, matches training
 
 from streaminlip.v5 import StreamLipV5
@@ -195,8 +196,8 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt",               required=True)
     p.add_argument("--data_root",          default="data/processed")
-    p.add_argument("--smollm2_path",       default="pretrained/smollm2-360m")
-    p.add_argument("--avhubert_ckpt", default="pretrained/auto_avsr/vsr_trlrs2lrs3vox2avsp_base.pth")
+    p.add_argument("--smollm2_path",       default=str(REPO_ROOT / "ckpt/streamlip-v5-lm"))
+    p.add_argument("--avhubert_ckpt", default=str(REPO_ROOT / "ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth"))
     p.add_argument("--cross_attn_every_n", type=int, default=0)
     p.add_argument("--split",              default="pretrain")
     p.add_argument("--n_clips",            type=int, default=500)

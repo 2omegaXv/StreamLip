@@ -1,0 +1,24 @@
+data_root: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed
+code_cache_root: data/moshiko_mimi_code_cache_len60_260_84435_all
+clip_list: configs/eval_splits/pretrain_len60_260_train83435_except_heldout_seed73.txt
+val_clip_list: configs/eval_splits/pretrain_len120_220_heldout1000_seed43.txt
+output_dir: runs/mimi_code_avsr
+run_name: len60_260_83435_codebook0_ar_textjson_crossattn_regstrong_moshiko_mimi_v1
+
+codebook: 0
+architecture: ar
+condition_mode: video_spk_text_crossattn
+text_source: text_json
+n_layers: 3
+dim: 384
+n_heads: 6
+dropout: 0.2
+label_smoothing: 0.08
+weight_decay: 0.2
+
+batch_size: 64
+num_workers: 8
+lr: 0.0003
+max_steps: 12000
+eval_every: 250
+save_every: 1000

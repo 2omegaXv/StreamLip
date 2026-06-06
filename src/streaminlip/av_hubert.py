@@ -103,9 +103,10 @@ def load_avhubert(checkpoint_path: str, device: str = "cpu") -> nn.Module:
     _infer("encoder_embed_dim",     "encoder.layers.0.self_attn.q_proj.weight", 1, 768)
     _infer("encoder_ffn_embed_dim", "encoder.layers.0.fc1.weight",              0, 3072)
     _infer("encoder_attention_heads", "encoder.layers.0.self_attn.q_proj.weight", 1, 768)
-    model_cfg_dict["encoder_attention_heads"] = (
-        model_cfg_dict["encoder_attention_heads"] // 64
-    )
+    # If _infer set heads from embed_dim (e.g. 768), divide by head_dim=64 to get count.
+    # If cfg already stored the correct count (e.g. 12), skip division.
+    if model_cfg_dict["encoder_attention_heads"] > 64:
+        model_cfg_dict["encoder_attention_heads"] //= 64
 
     if not model_cfg_dict.get("encoder_layers"):
         n = max((int(_k.split("encoder.layers.")[1].split(".")[0]) + 1

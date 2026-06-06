@@ -45,15 +45,17 @@ class SpeakerEncoder(nn.Module):
         """
         face: (B, 3, 256, 256)     — single face image, ImageNet normalized
               OR (B, C, 3, 256, 256) — C face frames, mean-pooled before encoding
+              OR (B, 256)           — pre-extracted speaker embedding (fast path)
         returns: id̂ (B, 256)
         """
+        if face.dim() == 2:
+            # Fast path: already a 256-d speaker embedding, cast dtype only
+            return face.to(self.proj.weight.dtype)
+
         if face.dim() == 5:
-            # (B, C, 3, 256, 256) → mean over C → (B, 3, 256, 256)
             face = face.mean(dim=1)
 
-        # ResNet50 expects 224×224; resize without distortion
         face = F.interpolate(face, size=(224, 224), mode="bilinear", align_corners=False)
-
-        feat = self.backbone(face)              # (B, 2048, 1, 1)
-        feat = feat.flatten(1)                  # (B, 2048)
-        return self.proj(feat.to(self.proj.weight.dtype))  # (B, 256)
+        feat = self.backbone(face)
+        feat = feat.flatten(1)
+        return self.proj(feat.to(self.proj.weight.dtype))
