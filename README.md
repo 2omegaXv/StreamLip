@@ -60,7 +60,7 @@ doc/fm_avsr_final_status_2026-06-04.md
 doc/fm_avsr_audio_generation_architecture.md
 doc/raw_video_avsr_recon_pipeline_usage.md
 report/fm_avsr_final_report_2026-06-05.pdf
-poster/fm_avsr_poster.pdf
+poster/DL poster project 23.pdf
 ```
 
 Historical proposal, literature, early design, and old paper-reading materials
