@@ -100,9 +100,13 @@ sudo apt-get install -y ffmpeg
 Create a Python 3.10 virtualenv and install the single runtime requirements
 file:
 
+> **Note:** pip 24.1+ rejects `omegaconf==2.0.6` due to a metadata syntax
+> issue. Downgrade pip first if your system pip is 24.1 or later.
+
 ```bash
 python3.10 -m venv .venv
 .venv/bin/pip install --upgrade pip
+.venv/bin/pip install 'pip<24.1'
 .venv/bin/pip install -r requirements.txt
 ```
 
@@ -143,7 +147,84 @@ ckpt/recon/streamlip_recon_timbrefix_step_002000.pt
 ckpt/recon/streamlip_recon_residual_base_step_005000.pt
 ```
 
-Verify the environment before running inference:
+Upload these files to `pancx/streamlip-audio-recon-ckpt-pub`:
+
+```text
+ckpt/recon/streamlip_recon_timbrefix_step_002000.pt
+ckpt/recon/streamlip_recon_residual_base_step_005000.pt
+ckpt/v5/streamlip_v5_olmo_step_001500_infer.pt
+ckpt/streamlip-v5-lm/
+ckpt/norm/latent_norm_stats.npz
+ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth
+ckpt/speaker/resnet50-11ad3fa6.pth
+```
+
+The first five entries are our trained/project-specific artifacts. The
+Auto-AVSR and ResNet50 files are pretrained dependencies, but they are small
+enough to keep pinned in the project repo so the default paths work without
+extra third-party download steps.
+
+These public pretrained dependencies can be restored directly from HF mirror
+and do not need to be uploaded by us:
+
+```text
+ckpt/mimi/
+ckpt/smollm2-360m/
+```
+
+To upload the project-specific checkpoint repository, authenticate against the
+official Hugging Face endpoint. If this machine cannot connect to
+`huggingface.co` directly, enable a local proxy first. SOCKS proxies require
+`socksio`, which is included in `requirements.txt`.
+
+```bash
+export STREAMLIP_CKPT_REPO='pancx/streamlip-audio-recon-ckpt-pub'
+
+unset HF_ENDPOINT
+.venv/bin/python -m pip install -U huggingface_hub socksio
+.venv/bin/hf auth login
+
+# Optional, only if direct access to huggingface.co is blocked:
+# export HTTPS_PROXY=socks5://127.0.0.1:7890
+# export HTTP_PROXY=socks5://127.0.0.1:7890
+# export ALL_PROXY=socks5://127.0.0.1:7890
+
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/recon recon --repo-type model
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/v5/streamlip_v5_olmo_step_001500_infer.pt v5/streamlip_v5_olmo_step_001500_infer.pt --repo-type model
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/streamlip-v5-lm streamlip-v5-lm --repo-type model
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/norm norm --repo-type model
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/auto-avsr auto-avsr --repo-type model
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/speaker speaker --repo-type model
+```
+
+The uploaded V5 checkpoint is inference-only: it keeps `step` and `model`, and
+drops the optimizer state from the new step-1500 V5 training checkpoint. To regenerate
+it from the training checkpoint:
+
+```bash
+.venv/bin/python scripts/strip_v5_ckpt_for_infer.py \
+  --input runs/v5/v5_olmo_lr1e-6_ep50_eos_frame500_warmup0/step_001500.pt \
+  --output ckpt/v5/streamlip_v5_olmo_step_001500_infer.pt \
+  --overwrite
+```
+
+### Additional Dependencies
+
+The pipeline imports helper code from the
+[Auto-AVSR](https://github.com/mpc001/auto_avsr) repository (mediapipe-based
+lip crop, conformer model definition). Clone it into `third_party/`:
+
+```bash
+git clone https://github.com/mpc001/auto_avsr.git third_party/auto_avsr
+```
+
+Note: this is separate from the model weight at `ckpt/auto-avsr/`. The weight
+file is the trained checkpoint; the `third_party/` clone supplies the Python
+modules that load it.
+
+### Verify the Environment
+
+Run the validation script before inference:
 
 ```bash
 .venv/bin/python scripts/check_env.py

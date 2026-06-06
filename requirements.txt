@@ -11,9 +11,9 @@
 --extra-index-url https://download.pytorch.org/whl/cu128
 
 # CUDA/PyTorch stack
-torch==2.10.0
+torch==2.10.0+cu128
 torchaudio==2.10.0+cu128
-torchvision==0.25.0
+torchvision==0.25.0+cu128
 
 # Hugging Face / codec / LM stack
 transformers==5.8.1
@@ -26,7 +26,7 @@ sentencepiece==0.1.96
 
 # Numeric/audio/video runtime
 numpy==1.26.4
-scipy==1.10.0
+scipy>=1.11.4
 opencv-python-headless
 decord==0.6.0
 av==17.0.1
@@ -43,7 +43,7 @@ pytorch-lightning==2.6.5
 editdistance==0.6.0
 
 # App / evaluation / utilities
-gradio==6.16.0
+gradio==6.15.2
 jiwer==4.0.0
 einops==0.8.2
 tqdm==4.67.3
