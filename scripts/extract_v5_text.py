@@ -5,7 +5,7 @@ extract_v5_text.py — 批量对指定 clip list 跑 StreamLip V5 推理，
 Usage:
   uv run python scripts/extract_v5_text.py \
     --clip_list configs/eval_splits/pretrain_len80_260_lipavsr_val1000_seed43.txt \
-    --v5_ckpt ckpt/v5/streamlip_v5_olmo_step_002000.pt \
+    --v5_ckpt ckpt/v5/streamlip_v5_olmo_step_001500_infer.pt \
     --v5_lm_path ckpt/streamlip-v5-lm \
     --data_root data/processed
 """

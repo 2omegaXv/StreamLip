@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Gradio GUI for the Raw Video AVSR Reconstruction Pipeline.
 
-    /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \\
-        scripts/gradio_avsr_gui.py [--port 7860]
+    .venv/bin/python scripts/gradio_avsr_gui.py [--port 7860]
 """
 from __future__ import annotations
 

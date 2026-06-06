@@ -17,8 +17,7 @@ flow used for the external trump/hrx checks:
 
 Run with the repo .venv, for example:
 
-  /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
-    scripts/run_raw_video_avsr_recon_pipeline.py \
+  .venv/bin/python scripts/run_raw_video_avsr_recon_pipeline.py \
     --input data/hrx.mov --exp hrx_reprocess_avsr
 """
 from __future__ import annotations
