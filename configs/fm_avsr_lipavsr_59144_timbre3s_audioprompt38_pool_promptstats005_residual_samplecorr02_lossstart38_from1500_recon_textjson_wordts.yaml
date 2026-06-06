@@ -1,13 +1,13 @@
-data_root: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed
-mimi_path: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/mimi
-smollm2_path: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/smollm2-360m
+data_root: data/processed
+mimi_path: ckpt/mimi
+smollm2_path: ckpt/smollm2-360m
 output_dir: runs/fm_avsr
 run_name: lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1
 split: pretrain
 clip_list: configs/eval_splits/pretrain_lipavsr_train59144_seed44_plus_ready_remaining9144_excl_val1000_seed43.txt
 val_clip_list: configs/eval_splits/pretrain_len80_260_lipavsr_val1000_seed43.txt
-resume_ckpt: runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_from1000_recon_textjson_wordts_v1/step_001500.pt
-residual_base_ckpt: runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_from4000_recon_textjson_wordts_v1/step_005000.pt
+resume_ckpt: ckpt/recon/streamlip_recon_timbrefix_step_002000.pt
+residual_base_ckpt: ckpt/recon/streamlip_recon_residual_base_step_005000.pt
 
 batch_size: 64
 num_workers: 8

@@ -114,6 +114,8 @@ def _norm_word(word: str) -> str:
 
 def read_clip_text(clip: str | Path, text_source: str = "avsr") -> str:
     clip = Path(clip)
+    if text_source in ("v5", "v5_avsr_ts"):
+        return re.sub(r"\s+", " ", (clip / "streamlip_v5_text.txt").read_text()).strip()
     if text_source == "lipavsr":
         return re.sub(r"\s+", " ", (clip / "avsr_text_lipavsr.txt").read_text()).strip()
     if text_source == "text_json":
@@ -135,9 +137,11 @@ def read_clip_text(clip: str | Path, text_source: str = "avsr") -> str:
 
 def smollm2_hidden_path(clip: str | Path, text_source: str = "avsr") -> Path:
     name_by_source = {
-        "avsr": "smollm2_h.npy",
-        "text_json": "smollm2_h_text_json.npy",
-        "lipavsr": "smollm2_h_lipavsr.npy",
+        "avsr":       "smollm2_h.npy",
+        "text_json":  "smollm2_h_text_json.npy",
+        "lipavsr":    "smollm2_h_lipavsr.npy",
+        "v5":         "smollm2_h_v5.npy",
+        "v5_avsr_ts": "smollm2_h_v5.npy",   # V5 hidden states + AVSR timestamps
     }
     name = name_by_source.get(text_source)
     if name is None:
@@ -384,9 +388,15 @@ class FMAVSRDataset(Dataset):
         txt = read_clip_text(c, self.text_source)
         lm_idx = None
         if self.text_alignment_mode == "word_timestamps" and self.tokenizer is not None:
-            meta = json.loads((c / "text.json").read_text())
+            if self.text_source == "v5":
+                # V5 has its own forced-aligned timestamps
+                ts_path = c / "streamlip_v5_timestamps.json"
+                words = json.loads(ts_path.read_text()) if ts_path.exists() else []
+            else:
+                meta  = json.loads((c / "text.json").read_text())
+                words = meta.get("words", [])
             lm_idx = build_word_timestamp_lm_indices(
-                txt, meta.get("words", []), self.tokenizer, lat.shape[0]
+                txt, words, self.tokenizer, lat.shape[0]
             )
         item = {
             "enc": enc, "latent": lat, "speaker": spk, "h_lm": h_lm,

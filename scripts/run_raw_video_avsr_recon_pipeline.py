@@ -1,4 +1,4 @@
-"""One-command raw video -> AVSR-conditioned audio reconstruction pipeline.
+"""One-command raw video -> StreamLip-conditioned audio reconstruction pipeline.
 
 This script is intentionally small and explicit. It reproduces the raw-video
 flow used for the external trump/hrx checks:
@@ -7,8 +7,9 @@ flow used for the external trump/hrx checks:
    - for silent video with --ref_audio, prepend a black 3.04s prompt segment
      carrying the first 3.04s of reference audio
 2. run the existing face/audio preprocessing for face.npz, audio.wav, lip.npy
-3. run the new Auto-AVSR-compatible reprocess_worker_avsr.py for lip_avsr.npy
-4. extract Mimi latent, Auto-AVSR encoder/text, SmolLM2 hidden, speaker/timbre
+3. run the StreamLip visual preprocessing worker for lip_avsr.npy
+4. extract Mimi latent, visual encoder latent, StreamLip V5 text, SmolLM2
+   hidden states, speaker/timbre conditions
 5. run the current best recon checkpoint with 3s audio prompt
 6. mux post-3.04s predicted audio back to the standardized video, cropping the
    prompt segment away
@@ -34,15 +35,15 @@ import numpy as np
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MAIN_ROOT = Path("/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A")
 DEFAULT_CONFIG = (
     "configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_"
     "residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml"
 )
 DEFAULT_CKPT = (
-    "runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_"
-    "residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt"
+    "ckpt/recon/streamlip_recon_timbrefix_step_002000.pt"
 )
+DEFAULT_V5_CKPT = "ckpt/v5/streamlip_v5_olmo_step_002000_infer.pt"
+DEFAULT_V5_LM_PATH = "ckpt/streamlip-v5-lm"
 PROMPT_FRAMES = 38
 LATENT_DIM = 512
 VIDEO_FPS = 25.0
@@ -55,6 +56,10 @@ def run(cmd: list[str], *, cwd: Path = REPO_ROOT) -> None:
     subprocess.run(cmd, cwd=str(cwd), check=True)
 
 
+def _path_str(value: str | Path) -> str:
+    return str(value)
+
+
 def write_json(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2))
@@ -63,6 +68,28 @@ def write_json(path: Path, value) -> None:
 def require_file(path: Path, label: str) -> None:
     if not path.exists():
         raise FileNotFoundError(f"{label} not found: {path}")
+
+
+def has_audio_stream(video_path: Path) -> bool:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            str(video_path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    return bool(result.stdout.strip())
+
+
+def effective_silent_input(requested_silent: bool, input_video: Path) -> bool:
+    return bool(requested_silent or not has_audio_stream(input_video))
 
 
 def standardize_video(input_video: Path, out_mp4: Path, size: int, *, silent_input: bool = False) -> None:
@@ -272,38 +299,132 @@ def extract_speaker_and_timbre(
     )
 
 
+def build_extract_avsr_enc_command(
+    processed_root: str | Path,
+    clip_list: str | Path,
+    auto_avsr_ckpt: str | Path,
+) -> list[str]:
+    return [
+        sys.executable,
+        str(REPO_ROOT / "scripts/extract_avsr_enc.py"),
+        "--data_root", _path_str(processed_root),
+        "--clip_list", _path_str(clip_list),
+        "--input_name", "lip_avsr.npy",
+        "--output_name", "avsr_enc_lipavsr.npy",
+        "--text_output_name", "avsr_text_lipavsr.txt",
+        "--avsr_ckpt", _path_str(auto_avsr_ckpt),
+        "--gpu", "0",
+        "--force",
+        "--batch_size", "1",
+    ]
+
+
+def build_extract_v5_text_command(
+    processed_root: str | Path,
+    clip_list: str | Path,
+    avsr_ckpt: str | Path,
+    v5_ckpt: str | Path,
+    v5_lm_path: str | Path,
+    *,
+    beam: int = 3,
+    cross_attn_every_n: int = 4,
+) -> list[str]:
+    return [
+        sys.executable,
+        str(REPO_ROOT / "scripts/extract_v5_text.py"),
+        "--data_root", _path_str(processed_root),
+        "--clip_list", _path_str(clip_list),
+        "--input_name", "avsr_enc_lipavsr.npy",
+        "--output_name", "streamlip_v5_text.txt",
+        "--avsr_ckpt", _path_str(avsr_ckpt),
+        "--v5_ckpt", _path_str(v5_ckpt),
+        "--v5_lm_path", _path_str(v5_lm_path),
+        "--cross_attn_every_n", str(cross_attn_every_n),
+        "--beam", str(beam),
+        "--overwrite",
+    ]
+
+
+def build_extract_smollm2_command(
+    processed_root: str | Path,
+    clip_list: str | Path,
+    smollm2_path: str | Path,
+    text_source: str,
+) -> list[str]:
+    return [
+        sys.executable,
+        str(REPO_ROOT / "scripts/extract_smollm2_h.py"),
+        "--data_root", _path_str(processed_root),
+        "--clip_list", _path_str(clip_list),
+        "--text_source", text_source,
+        "--smollm2_path", _path_str(smollm2_path),
+        "--batch_size", "1",
+        "--overwrite",
+    ]
+
+
 def extract_avsr_and_text(
     processed_root: Path,
     clip_list: Path,
     auto_avsr_ckpt: Path,
     smollm2_path: Path,
-) -> None:
-    run([
-        sys.executable,
-        str(REPO_ROOT / "scripts/extract_avsr_enc.py"),
-        "--data_root", str(processed_root),
-        "--clip_list", str(clip_list),
-        "--input_name", "lip_avsr.npy",
-        "--output_name", "avsr_enc_lipavsr.npy",
-        "--text_output_name", "avsr_text_lipavsr.txt",
-        "--avsr_ckpt", str(auto_avsr_ckpt),
-        "--gpu", "0",
-        "--force",
-        "--batch_size", "1",
-    ])
+    *,
+    text_model: str,
+    v5_ckpt: Path,
+    v5_lm_path: Path,
+    v5_beam: int,
+) -> str:
+    run(build_extract_avsr_enc_command(processed_root, clip_list, auto_avsr_ckpt))
     rel = clip_list.read_text().strip()
     clip_dir = processed_root / rel
     shutil.copyfile(clip_dir / "avsr_text_lipavsr.txt", clip_dir / "avsr_text.txt")
-    run([
+    if text_model == "v5":
+        run(build_extract_v5_text_command(
+            processed_root,
+            clip_list,
+            auto_avsr_ckpt,
+            v5_ckpt,
+            v5_lm_path,
+            beam=v5_beam,
+        ))
+        text_source = "v5"
+    elif text_model == "avsr":
+        text_source = "lipavsr"
+    else:
+        raise ValueError(f"unknown text_model={text_model!r}")
+    run(build_extract_smollm2_command(processed_root, clip_list, smollm2_path, text_source))
+    return text_source
+
+
+def build_eval_recon_command(
+    processed_root: str | Path,
+    clip_list: str | Path,
+    output_dir: str | Path,
+    config: str | Path,
+    ckpt: str | Path,
+    text_source: str,
+    *,
+    silent_input: bool = False,
+) -> list[str]:
+    output_dir = Path(output_dir)
+    wav_start = recon_wav_start_frame(silent_input=silent_input)
+    return [
         sys.executable,
-        str(REPO_ROOT / "scripts/extract_smollm2_h.py"),
-        "--data_root", str(processed_root),
-        "--clip_list", str(clip_list),
-        "--text_source", "lipavsr",
-        "--smollm2_path", str(smollm2_path),
-        "--batch_size", "1",
-        "--overwrite",
-    ])
+        str(REPO_ROOT / "scripts/eval_fm_avsr.py"),
+        "--config", _path_str(config),
+        "--ckpt", _path_str(ckpt),
+        "--data_root", _path_str(processed_root),
+        "--clip_list", _path_str(clip_list),
+        "--text_source", text_source,
+        "--text_alignment_mode", "uniform",
+        "--output_dir", _path_str(output_dir),
+        "--n", "1",
+        "--use_recon",
+        "--audio_prompt_name", "audio_prompt.npy",
+        "--wav_start_frame", str(wav_start),
+        "--metric_start_frame", str(wav_start),
+        "--metrics_json", str(output_dir / "metrics.json"),
+    ] + ([] if silent_input else ["--save_gt"])
 
 
 def run_recon(
@@ -312,27 +433,19 @@ def run_recon(
     output_dir: Path,
     config: Path,
     ckpt: Path,
+    text_source: str,
     *,
     silent_input: bool = False,
 ) -> None:
-    wav_start = recon_wav_start_frame(silent_input=silent_input)
-    run([
-        sys.executable,
-        str(REPO_ROOT / "scripts/eval_fm_avsr.py"),
-        "--config", str(config),
-        "--ckpt", str(ckpt),
-        "--data_root", str(processed_root),
-        "--clip_list", str(clip_list),
-        "--text_source", "lipavsr",
-        "--text_alignment_mode", "uniform",
-        "--output_dir", str(output_dir),
-        "--n", "1",
-        "--use_recon",
-        "--audio_prompt_name", "audio_prompt.npy",
-        "--wav_start_frame", str(wav_start),
-        "--metric_start_frame", str(wav_start),
-        "--metrics_json", str(output_dir / "metrics.json"),
-    ] + ([] if silent_input else ["--save_gt"]))
+    run(build_eval_recon_command(
+        processed_root,
+        clip_list,
+        output_dir,
+        config,
+        ckpt,
+        text_source,
+        silent_input=silent_input,
+    ))
 
 
 def recon_wav_start_frame(*, silent_input: bool) -> int:
@@ -428,14 +541,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fa_device", default="cuda:0")
     parser.add_argument("--size", type=int, default=224)
     parser.add_argument("--force", action="store_true", help="Delete eval_out/<exp> before running.")
-    parser.add_argument("--mimi_path", default=str(MAIN_ROOT / "pretrained/mimi"))
-    parser.add_argument("--smollm2_path", default=str(MAIN_ROOT / "pretrained/smollm2-360m"))
+    parser.add_argument("--mimi_path", default=str(REPO_ROOT / "ckpt/mimi"))
+    parser.add_argument("--smollm2_path", default=str(REPO_ROOT / "ckpt/smollm2-360m"))
+    parser.add_argument("--text_model", choices=["v5", "avsr"], default="v5",
+                        help="Visual-to-text model used for the semantic condition. Default: StreamLip V5.")
+    parser.add_argument("--v5_ckpt", default=str(REPO_ROOT / DEFAULT_V5_CKPT),
+                        help="StreamLip V5 checkpoint used when --text_model v5.")
+    parser.add_argument("--v5_lm_path", default=str(REPO_ROOT / DEFAULT_V5_LM_PATH),
+                        help="LM/tokenizer path for StreamLip V5 decoding.")
+    parser.add_argument("--v5_beam", type=int, default=3,
+                        help="Beam size for StreamLip V5 offline decoding.")
     parser.add_argument(
         "--auto_avsr_ckpt",
-        default=str(MAIN_ROOT / "pretrained/auto_avsr/vsr_trlrs2lrs3vox2avsp_base.pth"),
+        default=str(REPO_ROOT / "ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth"),
     )
-    parser.add_argument("--resnet50_weights", default=str(MAIN_ROOT / "pretrained/resnet50-11ad3fa6.pth"))
-    parser.add_argument("--norm_stats", default=str(MAIN_ROOT / "data/processed/latent_norm_stats.npz"))
+    parser.add_argument("--resnet50_weights", default=str(REPO_ROOT / "ckpt/speaker/resnet50-11ad3fa6.pth"))
+    parser.add_argument("--norm_stats", default=str(REPO_ROOT / "ckpt/norm/latent_norm_stats.npz"))
     parser.add_argument("--config", default=DEFAULT_CONFIG)
     parser.add_argument("--ckpt", default=DEFAULT_CKPT)
     parser.add_argument(
@@ -470,9 +591,13 @@ def main() -> None:
     clip_list = exp_dir / "clip_list.txt"
     clip_list.write_text(f"custom/{exp}/00001\n")
 
-    standardize_video(input_video, std_mp4, args.size, silent_input=args.silent_input)
+    silent_input = effective_silent_input(args.silent_input, input_video)
+    if silent_input and not args.silent_input:
+        print("Input has no audio stream; enabling --silent_input automatically.", flush=True)
+
+    standardize_video(input_video, std_mp4, args.size, silent_input=silent_input)
     concat_ref_prompt = should_concat_ref_prompt_prefix(
-        silent_input=args.silent_input,
+        silent_input=silent_input,
         has_ref_audio=ref_audio is not None,
     )
     if concat_ref_prompt:
@@ -480,24 +605,33 @@ def main() -> None:
         build_silent_ref_prompt_video(std_mp4, ref_audio, ref_prompt_mp4, args.size)
         std_mp4 = ref_prompt_mp4
         preprocess_mp4 = ref_prompt_mp4
-    elif args.silent_input:
+    elif silent_input:
         preprocess_mp4 = exp_dir / f"{exp}_224_25fps_silent_audio_for_preprocess.mp4"
         add_silent_audio(std_mp4, preprocess_mp4)
     run_face_audio_preprocess(preprocess_mp4, clip_dir, exp_dir, args.fa_device)
     run_avsr_lip_reprocess(std_mp4, clip_dir, exp_dir, args.fa_device, Path(args.avsr_worker))
     ref_latent = None
-    if args.silent_input and not concat_ref_prompt:
+    if silent_input and not concat_ref_prompt:
         n_video_frames = int(np.load(str(clip_dir / "lip_avsr.npy"), mmap_mode="r").shape[0])
         write_dummy_target_latent(clip_dir, n_video_frames)
     else:
         extract_mimi_latent(clip_dir, Path(args.mimi_path))
-    extract_avsr_and_text(processed_root, clip_list, Path(args.auto_avsr_ckpt), Path(args.smollm2_path))
+    text_source = extract_avsr_and_text(
+        processed_root,
+        clip_list,
+        Path(args.auto_avsr_ckpt),
+        Path(args.smollm2_path),
+        text_model=args.text_model,
+        v5_ckpt=Path(args.v5_ckpt),
+        v5_lm_path=Path(args.v5_lm_path),
+        v5_beam=args.v5_beam,
+    )
     extract_speaker_and_timbre(
         clip_dir,
         processed_root,
         Path(args.resnet50_weights),
         ref_latent=ref_latent,
-        zero_condition=args.silent_input and ref_latent is None,
+        zero_condition=silent_input and ref_latent is None,
     )
 
     recon_dir = exp_dir / "recon_lipavsr_prompt3s"
@@ -507,12 +641,13 @@ def main() -> None:
         recon_dir,
         Path(args.config),
         Path(args.ckpt),
-        silent_input=args.silent_input,
+        text_source,
+        silent_input=silent_input,
     )
-    mux_outputs(exp_dir, exp, recon_dir, std_mp4, silent_input=args.silent_input)
+    mux_outputs(exp_dir, exp, recon_dir, std_mp4, silent_input=silent_input)
     make_visualization(exp_dir, clip_dir)
 
-    pred_name, gt_name = result_video_names(exp, silent_input=args.silent_input)
+    pred_name, gt_name = result_video_names(exp, silent_input=silent_input)
     print("\nArtifacts:")
     print(f"  pred mp4: {exp_dir / pred_name}")
     if gt_name:

@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-PDF_NAME="fm_avsr_final_report_2026-06-04.pdf"
+PDF_NAME="fm_avsr_final_report_2026-06-05.pdf"
 BUILD_DIR="${BUILD_DIR:-$(mktemp -d)}"
 
 cleanup() {

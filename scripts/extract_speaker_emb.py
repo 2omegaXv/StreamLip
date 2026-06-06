@@ -16,6 +16,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from streaminlip.v2.speaker_encoder import SpeakerEncoder
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = Path("data/processed")
 CHUNK_SIZE = 6
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -59,7 +60,7 @@ def main():
     p.add_argument("--gpu",   type=int, default=0)
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--force", action="store_true")
-    p.add_argument("--resnet50_weights", default="pretrained/resnet50-11ad3fa6.pth")
+    p.add_argument("--resnet50_weights", default=str(REPO_ROOT / "ckpt/speaker/resnet50-11ad3fa6.pth"))
     args = p.parse_args()
 
     device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"

@@ -18,7 +18,8 @@ from pathlib import Path
 
 import numpy as np
 
-_TMPDIR = Path(__file__).parent.parent / ".tmp"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+_TMPDIR = REPO_ROOT / ".tmp"
 _TMPDIR.mkdir(exist_ok=True)
 os.environ["TMPDIR"] = str(_TMPDIR)
 
@@ -112,7 +113,7 @@ def parse_args():
     p.add_argument("--data_root",        default="data/processed")
     p.add_argument("--mimi_path",        default=None,
                    help="Unused by training; accepted so train/eval can share one YAML.")
-    p.add_argument("--smollm2_path",     default="pretrained/smollm2-360m",
+    p.add_argument("--smollm2_path",     default=str(REPO_ROOT / "ckpt/smollm2-360m"),
                    help="Tokenizer path used for word-timestamp text alignment.")
     p.add_argument("--output_dir",       default="runs/fm_avsr")
     p.add_argument("--run_name",         default="fm_avsr_with_text")
@@ -193,7 +194,7 @@ def parse_args():
                    default="none",
                    help="Optional per-latent-frame log-RMS energy condition.")
     p.add_argument("--auto_avsr_ckpt",
-                   default="/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/auto_avsr/vsr_trlrs2lrs3vox2avsp_base.pth",
+                   default=str(REPO_ROOT / "ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth"),
                    help="Checkpoint containing ctc.ctc_lo weights for CTC conditioning.")
     p.add_argument("--ctc_vocab_size", type=int, default=5049,
                    help="Auto-AVSR CTC vocabulary size.")

@@ -1,7 +1,7 @@
 data_root: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed
 mimi_path: /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/mimi
 output_dir: runs/fm_avsr
-run_name: pretrain_sample_endpoint
+run_name: pretrain_sample_endpoint_crop160_masked_v1
 split: pretrain
 clip_list: null
 

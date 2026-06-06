@@ -9,12 +9,12 @@ For each test clip:
 
 Usage:
   python scripts/eval_fm_avsr.py \
-      --ckpt runs/fm_avsr/fm_avsr_with_text/step_026580.pt \
+      --ckpt ckpt/recon/streamlip_recon_timbrefix_step_002000.pt \
       --n 20 --output_dir eval_out/with_text --save_gt
 
   # no-text ablation
   python scripts/eval_fm_avsr.py \
-      --ckpt runs/fm_avsr/fm_avsr_no_text/step_026580.pt \
+      --ckpt ckpt/recon/streamlip_recon_timbrefix_step_002000.pt \
       --no_text_cond --n 20 --output_dir eval_out/no_text --save_gt
 """
 import argparse, json, sys, wave
@@ -27,6 +27,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent))
+REPO_ROOT = Path(__file__).resolve().parents[1]
 from streaminlip.v2.fm_head import FMHead as _FMBase, SinusoidalTimeEmb, DiTBlock
 from streaminlip.fm_avsr_dataset import (
     FMAVSRDataset, _MAX_TA, _MAX_L, validate_latent_frame_rate,
@@ -141,8 +142,8 @@ def parse_args():
     p.add_argument("--residual_base_condition", action="store_true",
                    help="Append frozen residual-base recon latents as frame-level extra condition.")
     p.add_argument("--data_root",     default="data/processed")
-    p.add_argument("--mimi_path",     default="pretrained/mimi")
-    p.add_argument("--smollm2_path",  default="pretrained/smollm2-360m",
+    p.add_argument("--mimi_path",     default=str(REPO_ROOT / "ckpt/mimi"))
+    p.add_argument("--smollm2_path",  default=str(REPO_ROOT / "ckpt/smollm2-360m"),
                    help="Tokenizer path used for word-timestamp text alignment.")
     p.add_argument("--split",         default="pretrain")
     p.add_argument("--clip_list",     default=None,
@@ -160,9 +161,9 @@ def parse_args():
                    default="uniform",
                    help="How to align SmolLM2 hidden states to latent frames.")
     p.add_argument("--text_source",
-                   choices=["avsr", "text_json", "lipavsr"],
+                   choices=["avsr", "text_json", "lipavsr", "v5", "v5_avsr_ts"],
                    default="avsr",
-                   help="Text/SmolLM2 hidden-state source.")
+                   help="Text/SmolLM2 hidden-state source. v5_avsr_ts=V5 hidden states + AVSR timestamps.")
     p.add_argument("--visual_feature_name", default="avsr_enc.npy",
                    help="Per-clip visual feature file, e.g. avsr_enc.npy or avsr_enc_lipavsr.npy.")
     p.add_argument("--timbre_condition_name", default=None,
@@ -204,7 +205,7 @@ def parse_args():
                    default="none",
                    help="Optional log-RMS energy condition: GT upper-bound or model-predicted.")
     p.add_argument("--auto_avsr_ckpt",
-                   default="/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/auto_avsr/vsr_trlrs2lrs3vox2avsp_base.pth")
+                   default=str(REPO_ROOT / "ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth"))
     p.add_argument("--ctc_vocab_size", type=int, default=5049)
     p.add_argument("--ctc_topk", type=int, default=4)
     p.add_argument("--ctc_token_emb_dim", type=int, default=32)
@@ -632,9 +633,14 @@ def main():
                         h_lm = h_lm[:_MAX_L]
                     if args.text_alignment_mode == "word_timestamps":
                         txt = read_clip_text(cond_c, args.text_source)
-                        meta = json.loads((cond_c / "text.json").read_text())
+                        if args.text_source == "v5":
+                            ts_path = cond_c / "streamlip_v5_timestamps.json"
+                            words = json.loads(ts_path.read_text()) if ts_path.exists() else []
+                        else:
+                            meta  = json.loads((cond_c / "text.json").read_text())
+                            words = meta.get("words", [])
                         lm_idx = build_word_timestamp_lm_indices(
-                            txt, meta.get("words", []), tokenizer, T_a
+                            txt, words, tokenizer, T_a
                         )
                         h_down = gather_h_lm_by_lm_idx(h_lm, lm_idx, T_a, device)
                     else:

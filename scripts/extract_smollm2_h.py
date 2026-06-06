@@ -34,7 +34,7 @@ def parse_args():
     p.add_argument("--batch_size",   type=int, default=256)
     p.add_argument("--clip_list",    default=None,
                    help="Optional file with one processed clip path per line.")
-    p.add_argument("--text_source",  choices=["avsr", "text_json", "lipavsr"], default="avsr")
+    p.add_argument("--text_source",  choices=["avsr", "text_json", "lipavsr", "v5"], default="avsr")
     p.add_argument("--overwrite",    action="store_true")
     return p.parse_args()
 

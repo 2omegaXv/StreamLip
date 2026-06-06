@@ -7,11 +7,14 @@
 from __future__ import annotations
 
 import argparse
+import html
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 
@@ -38,8 +41,7 @@ _gnet.url_ok = lambda url, **kw: True   # noqa: E731
 # Paths
 # ---------------------------------------------------------------------------
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MAIN_ROOT = Path("/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A")
-VENV_PYTHON = MAIN_ROOT / ".venv/bin/python"
+VENV_PYTHON = Path(sys.executable)
 PIPELINE_SCRIPT = REPO_ROOT / "scripts/run_raw_video_avsr_recon_pipeline.py"
 
 DEFAULT_CONFIG = (
@@ -47,8 +49,7 @@ DEFAULT_CONFIG = (
     "residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml"
 )
 DEFAULT_CKPT = (
-    "runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_"
-    "residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt"
+    "ckpt/recon/streamlip_recon_timbrefix_step_002000.pt"
 )
 
 # ---------------------------------------------------------------------------
@@ -90,7 +91,26 @@ def _fmt_time(seconds: float) -> str:
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
-def _progress_html(step: int, elapsed: float, finished: bool, error: bool = False) -> str:
+def _find_result_video(exp: str) -> str | None:
+    exp_dir = REPO_ROOT / "eval_out" / exp
+    for name in (
+        f"{exp}_pred_prompt3s_post3s.mp4",
+        f"{exp}_pred_post3s.mp4",
+        f"{exp}_pred_full.mp4",
+    ):
+        path = exp_dir / name
+        if path.exists():
+            return str(path)
+    return None
+
+
+def _progress_html(
+    step: int,
+    elapsed: float,
+    finished: bool,
+    error: bool = False,
+    details: str | None = None,
+) -> str:
     time_str = _fmt_time(elapsed)
     if error:
         bar_color = "#ef4444"
@@ -117,6 +137,16 @@ def _progress_html(step: int, elapsed: float, finished: bool, error: bool = Fals
 
     bar_class = "avsr-bar" if running else ""
 
+    detail_html = ""
+    if details:
+        detail_html = (
+            '<pre style="white-space:pre-wrap;margin-top:10px;padding:10px;'
+            'background:#111827;color:#f9fafb;border-radius:6px;'
+            'font-size:12px;line-height:1.35;max-height:260px;overflow:auto">'
+            f"{html.escape(details)}"
+            "</pre>"
+        )
+
     return (
         f"{anim_style}"
         f'<div style="font-family:sans-serif;padding:4px 0">'
@@ -131,6 +161,7 @@ def _progress_html(step: int, elapsed: float, finished: bool, error: bool = Fals
         f'         style="width:100%;height:100%;background:{bar_color};'
         f'                border-radius:999px"></div>'
         f'  </div>'
+        f"{detail_html}"
         f'</div>'
     )
 
@@ -202,10 +233,12 @@ def run_pipeline(
 
     # read stdout in background thread → push new step indices to a queue
     step_q = queue.Queue()
+    log_tail = deque(maxlen=80)
 
     def _reader(proc):
         cur = 0
         for line in proc.stdout:
+            log_tail.append(line.rstrip())
             new = _infer_step(line, cur)
             if new != cur:
                 cur = new
@@ -245,12 +278,11 @@ def run_pipeline(
     elapsed = time.time() - t0
 
     if proc.returncode != 0:
-        yield btn_idle, _progress_html(step, elapsed, False, error=True), None
+        details = "\n".join(log_tail)
+        yield btn_idle, _progress_html(step, elapsed, False, error=True, details=details), None
         return
 
-    pred_name = f"{exp}_pred_full.mp4" if silent_input else f"{exp}_pred_prompt3s_post3s.mp4"
-    pred_mp4 = REPO_ROOT / "eval_out" / exp / pred_name
-    video_out = str(pred_mp4) if pred_mp4.exists() else None
+    video_out = _find_result_video(exp)
     yield btn_idle, _progress_html(N - 1, elapsed, finished=True), video_out
 
 
@@ -317,11 +349,11 @@ def build_app() -> gr.Blocks:
                 with gr.Accordion("⚙️ 高级参数", open=False):
                     fa_device        = gr.Textbox(label="fa_device",     value="cuda:0")
                     size             = gr.Number( label="缩放尺寸 (px)", value=224, precision=0)
-                    mimi_path        = gr.Textbox(label="Mimi",          value=str(MAIN_ROOT / "pretrained/mimi"))
-                    smollm2_path     = gr.Textbox(label="SmolLM2",       value=str(MAIN_ROOT / "pretrained/smollm2-360m"))
-                    auto_avsr_ckpt   = gr.Textbox(label="Auto-AVSR ckpt",value=str(MAIN_ROOT / "pretrained/auto_avsr/vsr_trlrs2lrs3vox2avsp_base.pth"))
-                    resnet50_weights = gr.Textbox(label="ResNet50 权重", value=str(MAIN_ROOT / "pretrained/resnet50-11ad3fa6.pth"))
-                    norm_stats       = gr.Textbox(label="Norm stats",    value=str(MAIN_ROOT / "data/processed/latent_norm_stats.npz"))
+                    mimi_path        = gr.Textbox(label="Mimi",          value=str(REPO_ROOT / "ckpt/mimi"))
+                    smollm2_path     = gr.Textbox(label="SmolLM2",       value=str(REPO_ROOT / "ckpt/smollm2-360m"))
+                    auto_avsr_ckpt   = gr.Textbox(label="Auto-AVSR ckpt",value=str(REPO_ROOT / "ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth"))
+                    resnet50_weights = gr.Textbox(label="ResNet50 权重", value=str(REPO_ROOT / "ckpt/speaker/resnet50-11ad3fa6.pth"))
+                    norm_stats       = gr.Textbox(label="Norm stats",    value=str(REPO_ROOT / "ckpt/norm/latent_norm_stats.npz"))
                     config_path      = gr.Textbox(label="Config yaml",   value=DEFAULT_CONFIG)
                     ckpt_path        = gr.Textbox(label="Checkpoint",    value=DEFAULT_CKPT)
 
@@ -363,7 +395,7 @@ def main() -> None:
         server_port=args.port,
         share=args.share,
         show_error=True,
-        allowed_paths=[str(REPO_ROOT), str(MAIN_ROOT)],
+        allowed_paths=[str(REPO_ROOT)],
     )
 
 

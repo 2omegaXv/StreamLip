@@ -1,21 +1,51 @@
-# FM-AVSR Audio Reconstruction
+# StreamLip Audio Reconstruction
 
-This branch keeps the current FM-AVSR deterministic recon pipeline and the
-raw-video demo path. The active script surface is intentionally small:
+This worktree contains the current StreamLip deterministic audio reconstruction
+pipeline, with StreamLip V5 as the default visual-to-text branch for raw-video
+inference. The active script surface is intentionally small:
 
 ```text
 scripts/train_fm_avsr.py
 scripts/eval_fm_avsr.py
 scripts/extract_avsr_enc.py
+scripts/extract_v5_text.py
 scripts/extract_smollm2_h.py
 scripts/extract_speaker_emb.py
 scripts/extract_timbre_cond.py
+scripts/decode_v5.py
 scripts/preprocess_lrs3.py
 scripts/preprocess_worker.py
 scripts/reprocess_worker_avsr.py
 scripts/run_preprocess_worker_no_flash_attn.py
 scripts/run_raw_video_avsr_recon_pipeline.py
 scripts/gradio_avsr_gui.py
+```
+
+The default raw-video command uses the local `ckpt/` directory. This directory
+is intentionally not part of the git history; it is the model bundle to upload
+or restore from cloud storage.
+
+```text
+ckpt/
+├── auto-avsr/
+│   └── vsr_trlrs2lrs3vox2avsp_base.pth
+├── mimi/
+│   ├── config.json
+│   ├── model.safetensors
+│   └── preprocessor_config.json
+├── norm/
+│   └── latent_norm_stats.npz
+├── recon/
+│   ├── streamlip_recon_residual_base_step_005000.pt
+│   └── streamlip_recon_timbrefix_step_002000.pt
+├── smollm2-360m/
+│   └── ...
+├── speaker/
+│   └── resnet50-11ad3fa6.pth
+├── streamlip-v5-lm/
+│   └── ...
+└── v5/
+    └── streamlip_v5_olmo_step_002000_infer.pt
 ```
 
 Legacy v2/v3/v4, Mimi-code, teacher-cache, and sweep scripts are archived under
@@ -29,7 +59,7 @@ Use these files for the current implemented system:
 doc/fm_avsr_final_status_2026-06-04.md
 doc/fm_avsr_audio_generation_architecture.md
 doc/raw_video_avsr_recon_pipeline_usage.md
-report/fm_avsr_final_report_2026-06-04.pdf
+report/fm_avsr_final_report_2026-06-05.pdf
 poster/fm_avsr_poster.pdf
 ```
 
@@ -39,34 +69,139 @@ be treated as the current architecture.
 
 ## Environment
 
-Use the shared virtualenv from the main checkout:
+Install system tools first. The pipeline shells out to `ffmpeg` and `ffprobe`;
+Python packages alone are not enough.
 
 ```bash
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python --version
+sudo apt-get update
+sudo apt-get install -y ffmpeg
 ```
 
-Run commands from this worktree:
+Create a Python 3.10 virtualenv and install the single runtime requirements
+file:
 
 ```bash
-cd /mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.worktrees/fm-avsr-cleanup
+python3.10 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
 ```
 
-The raw-video path expects these local assets to exist:
+Restore the model files under `ckpt/`. The recommended release layout is a
+small project-specific Hugging Face model repository plus public pretrained
+dependencies from HF mirror. HF mirror is used for download acceleration; for
+authentication and upload, use the official Hugging Face endpoint.
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+export STREAMLIP_CKPT_REPO='pancx/streamlip-audio-recon-ckpt-pub'
+
+.venv/bin/python -m pip install -U huggingface_hub
+
+# Our trained weights and pinned runtime files.
+.venv/bin/hf download "$STREAMLIP_CKPT_REPO" \
+  --repo-type model \
+  --local-dir ckpt
+
+# Public pretrained dependencies. These do not need to be uploaded by us.
+.venv/bin/hf download kyutai/mimi \
+  --local-dir ckpt/mimi
+
+.venv/bin/hf download HuggingFaceTB/SmolLM2-360M \
+  --local-dir ckpt/smollm2-360m
+```
+
+After download, the directory should look like:
 
 ```text
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/mimi
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/smollm2-360m
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/auto_avsr/vsr_trlrs2lrs3vox2avsp_base.pth
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/pretrained/resnet50-11ad3fa6.pth
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/data/processed/latent_norm_stats.npz
+ckpt/mimi
+ckpt/smollm2-360m
+ckpt/streamlip-v5-lm
+ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth
+ckpt/speaker/resnet50-11ad3fa6.pth
+ckpt/norm/latent_norm_stats.npz
+ckpt/v5/streamlip_v5_olmo_step_002000_infer.pt
+ckpt/recon/streamlip_recon_timbrefix_step_002000.pt
+ckpt/recon/streamlip_recon_residual_base_step_005000.pt
 ```
+
+Upload these files to `pancx/streamlip-audio-recon-ckpt-pub`:
+
+```text
+ckpt/recon/streamlip_recon_timbrefix_step_002000.pt
+ckpt/recon/streamlip_recon_residual_base_step_005000.pt
+ckpt/v5/streamlip_v5_olmo_step_002000_infer.pt
+ckpt/streamlip-v5-lm/
+ckpt/norm/latent_norm_stats.npz
+ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth
+ckpt/speaker/resnet50-11ad3fa6.pth
+```
+
+The first five entries are our trained/project-specific artifacts. The
+Auto-AVSR and ResNet50 files are pretrained dependencies, but they are small
+enough to keep pinned in the project repo so the default paths work without
+extra third-party download steps.
+
+These public pretrained dependencies can be restored directly from HF mirror
+and do not need to be uploaded by us:
+
+```text
+ckpt/mimi/
+ckpt/smollm2-360m/
+```
+
+To upload the project-specific checkpoint repository, authenticate against the
+official Hugging Face endpoint. If this machine cannot connect to
+`huggingface.co` directly, enable a local proxy first. SOCKS proxies require
+`socksio`, which is included in `requirements.txt`.
+
+```bash
+export STREAMLIP_CKPT_REPO='pancx/streamlip-audio-recon-ckpt-pub'
+
+unset HF_ENDPOINT
+.venv/bin/python -m pip install -U huggingface_hub socksio
+.venv/bin/hf auth login
+
+# Optional, only if direct access to huggingface.co is blocked:
+# export HTTPS_PROXY=socks5://127.0.0.1:7890
+# export HTTP_PROXY=socks5://127.0.0.1:7890
+# export ALL_PROXY=socks5://127.0.0.1:7890
+
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/recon recon --repo-type model
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/v5/streamlip_v5_olmo_step_002000_infer.pt v5/streamlip_v5_olmo_step_002000_infer.pt --repo-type model
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/streamlip-v5-lm streamlip-v5-lm --repo-type model
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/norm norm --repo-type model
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/auto-avsr auto-avsr --repo-type model
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/speaker speaker --repo-type model
+```
+
+The uploaded V5 checkpoint is inference-only: it keeps `step` and `model`, and
+drops the optimizer state from the original training checkpoint.
+
+Verify the environment before running inference:
+
+```bash
+.venv/bin/python scripts/check_env.py
+```
+
+On CPU-only machines, use `--skip-cuda` only for dependency inspection. Raw
+video inference is designed for CUDA and is not practical on CPU.
 
 The default pipeline and GUI use the current timbre-fix recon checkpoint:
 
 ```text
 configs/fm_avsr_lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts.yaml
-runs/fm_avsr/lipavsr_59144_timbre3s_audioprompt38_pool_promptstats005_residual_samplecorr02_lossstart38_from1500_recon_textjson_wordts_v1/step_002000.pt
+ckpt/recon/streamlip_recon_timbrefix_step_002000.pt
 ```
+
+The raw-video pipeline now uses StreamLip V5 as the default visual-to-text
+model. The visual encoder latent is still saved as `avsr_enc_lipavsr.npy`
+because it is the shared 768-d visual speech feature consumed by both StreamLip
+V5 and the audio recon head. StreamLip V5 decodes that latent into
+`streamlip_v5_text.txt`, and SmolLM2 hidden states are extracted as
+`smollm2_h_v5.npy`.
+
+For ablation or compatibility checks, the old decoded-text path is still
+available with `--text_model avsr`.
 
 ## Raw Video Pipeline
 
@@ -77,10 +212,10 @@ used as the same-clip timbre/audio prompt and are removed from the listening
 output:
 
 ```bash
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
+.venv/bin/python \
   scripts/run_raw_video_avsr_recon_pipeline.py \
   --input data/trump.mov \
-  --exp trump_cleanup_verify \
+  --exp trump_ckpt_default_verify \
   --force
 ```
 
@@ -92,10 +227,11 @@ raw mp4/mov
 -> face.npz/audio.wav/lip.npy
 -> lip_avsr.npy
 -> Mimi latent
--> avsr_enc_lipavsr.npy + avsr_text_lipavsr.txt
--> smollm2_h_lipavsr.npy
+-> avsr_enc_lipavsr.npy
+-> streamlip_v5_text.txt
+-> smollm2_h_v5.npy
 -> speaker_emb.npy + timbre_cond.npy
--> FM-AVSR recon
+-> StreamLip recon
 -> post-3.04s generated mp4
 ```
 
@@ -146,7 +282,7 @@ the target video, and silent-mode exports crop it away after inference.
 Reproduce the generated output:
 
 ```bash
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
+.venv/bin/python \
   scripts/run_raw_video_avsr_recon_pipeline.py \
   --input data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4 \
   --ref_audio data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4 \
@@ -173,7 +309,7 @@ eval_out/trump_silent_ref_demo_full_e2_lossstart38/trump_silent_ref_demo_full_e2
 Start the Gradio UI:
 
 ```bash
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
+.venv/bin/python \
   scripts/gradio_avsr_gui.py \
   --port 7860
 ```
@@ -191,20 +327,22 @@ The GUI calls the same `scripts/run_raw_video_avsr_recon_pipeline.py` backend.
 The cleanup branch was verified with:
 
 ```bash
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python \
+.venv/bin/python \
   scripts/run_raw_video_avsr_recon_pipeline.py \
   --input data/trump.mov \
-  --exp trump_cleanup_verify \
+  --exp trump_ckpt_default_verify \
   --force
 ```
 
 Generated artifacts:
 
 ```text
-eval_out/trump_cleanup_verify/trump_cleanup_verify_pred_prompt3s_post3s.mp4
-eval_out/trump_cleanup_verify/trump_cleanup_verify_gt_mimi_post3s.mp4
-eval_out/trump_cleanup_verify/vis_reprocess_avsr/face_lip_avsr_side_by_side_with_audio.mp4
-eval_out/trump_cleanup_verify/recon_lipavsr_prompt3s/metrics.json
+eval_out/trump_ckpt_default_verify/trump_ckpt_default_verify_pred_prompt3s_post3s.mp4
+eval_out/trump_ckpt_default_verify/trump_ckpt_default_verify_gt_mimi_post3s.mp4
+eval_out/trump_ckpt_default_verify/vis_reprocess_avsr/face_lip_avsr_side_by_side_with_audio.mp4
+eval_out/trump_ckpt_default_verify/processed/custom/trump_ckpt_default_verify/00001/streamlip_v5_text.txt
+eval_out/trump_ckpt_default_verify/processed/custom/trump_ckpt_default_verify/00001/smollm2_h_v5.npy
+eval_out/trump_ckpt_default_verify/recon_lipavsr_prompt3s/metrics.json
 ```
 
 Observed metrics:
@@ -212,9 +350,10 @@ Observed metrics:
 ```text
 T_a: 371
 metric_start_frame: 38
-mean_corr: 0.3878001476
-mean_mse: 0.8064498901
-mean_mae: 0.6968652010
+text_model: v5
+mean_corr: 0.3862892466
+mean_mse: 0.8043726087
+mean_mae: 0.6964216828
 ```
 
 ## Tests
@@ -222,9 +361,11 @@ mean_mae: 0.6968652010
 Core validation command:
 
 ```bash
-/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A/.venv/bin/python -m unittest \
+.venv/bin/python -m unittest \
   tests.test_fm_avsr_dataset \
   tests.test_eval_fm_avsr \
+  tests.test_raw_video_pipeline \
   tests.test_timbre_condition \
-  tests.test_fm_head_temporal_condition
+  tests.test_fm_head_temporal_condition \
+  tests.test_check_env
 ```

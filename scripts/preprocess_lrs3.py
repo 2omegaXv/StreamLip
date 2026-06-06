@@ -29,7 +29,7 @@ from transformers import MimiModel
 
 LRS3_ROOT  = Path("/mnt/pfs/group-jt/zihan.guo/droid/LRS3/lrs3")
 OUT_ROOT   = Path("data/processed")
-MIMI_PATH  = Path("pretrained/mimi")
+MIMI_PATH  = Path("ckpt/mimi")
 WORKER_PY  = Path("scripts/preprocess_worker.py")
 PYTHON     = str(Path(sys.executable))
 

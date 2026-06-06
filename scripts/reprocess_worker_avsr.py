@@ -25,19 +25,13 @@ from face_alignment.utils import get_preds_fromhm
 warnings.filterwarnings("ignore")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MAIN_ROOT = Path("/mnt/pfs/group-jt/zihan.guo/droid/DL-V2A")
-MEDIAPIPE_CANDIDATES = [
-    REPO_ROOT / "third_party/auto_avsr/preparation/detectors/mediapipe",
-    MAIN_ROOT / "third_party/auto_avsr/preparation/detectors/mediapipe",
-]
-for mediapipe_dir in MEDIAPIPE_CANDIDATES:
-    if (mediapipe_dir / "video_process.py").exists():
-        sys.path.insert(0, str(mediapipe_dir))
-        break
+MEDIAPIPE_DIR = REPO_ROOT / "third_party/auto_avsr/preparation/detectors/mediapipe"
+if (MEDIAPIPE_DIR / "video_process.py").exists():
+    sys.path.insert(0, str(MEDIAPIPE_DIR))
 else:
     raise FileNotFoundError(
         "Auto-AVSR mediapipe video_process.py not found. Expected it under "
-        f"{MEDIAPIPE_CANDIDATES[0]} or {MEDIAPIPE_CANDIDATES[1]}."
+        f"{MEDIAPIPE_DIR}."
     )
 from video_process import VideoProcess  # noqa: E402
 

@@ -35,6 +35,10 @@ third_party/auto_avsr/
 .tmp/
 logs/
 proxy.sh
+ckpt/
+release/
+.superpowers/
+poster/unpacked_*/
 *.wav
 *.pt
 *.pth

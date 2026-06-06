@@ -21,6 +21,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from streaminlip.auto_avsr import AutoAVSRInferencer
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = Path("data/processed")
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -34,7 +35,7 @@ def main():
     p.add_argument("--limit",  type=int, default=None)
     p.add_argument("--force",  action="store_true")
     p.add_argument("--batch_size", type=int, default=32)
-    p.add_argument("--avsr_ckpt", default="pretrained/auto_avsr/vsr_trlrs2lrs3vox2avsp_base.pth")
+    p.add_argument("--avsr_ckpt", default=str(REPO_ROOT / "ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth"))
     p.add_argument("--data_root", default=str(DATA_ROOT))
     p.add_argument("--clip_list", default=None,
                    help="Optional file with clip paths relative to data_root or absolute paths.")
