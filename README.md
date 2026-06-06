@@ -6,14 +6,16 @@ inference. The active script surface is intentionally small:
 
 ![StreamLip architecture](poster/assets/report_system_architecture.png)
 
-**Trump demo.** The example below is a generated post-prompt output from the
-current raw-video pipeline. The source clip is a Trump speech segment; the
-model reconstructs the spoken audio and muxes it back to the face video.
+**Trump demo.** The example below is the checked-in Trump silent/reference demo
+output. The model uses a short reference-audio segment for timbre conditioning,
+reconstructs the target speech audio, and muxes it back to the face video.
 
 ![Trump generated demo](poster/assets/trump_demo.gif)
 
-The full mp4 examples are kept under `data/assets/demo_videos/`, including
-`0001_0003_pred_orig_post3s.mp4`, the source for the GIF above.
+The mp4 source for the GIF is
+`data/assets/trump_silent_ref_demo/trump_silent_ref_demo_full_pred_post3s.mp4`.
+Additional non-Trump generated examples are kept under
+`data/assets/demo_videos/`.
 
 ```text
 scripts/train_fm_avsr.py
