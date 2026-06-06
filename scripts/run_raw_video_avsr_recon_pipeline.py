@@ -42,7 +42,7 @@ DEFAULT_CONFIG = (
 DEFAULT_CKPT = (
     "ckpt/recon/streamlip_recon_timbrefix_step_002000.pt"
 )
-DEFAULT_V5_CKPT = "ckpt/v5/streamlip_v5_olmo_step_002000_infer.pt"
+DEFAULT_V5_CKPT = "ckpt/v5/streamlip_v5_olmo_step_001500_infer.pt"
 DEFAULT_V5_LM_PATH = "ckpt/streamlip-v5-lm"
 PROMPT_FRAMES = 38
 LATENT_DIM = 512

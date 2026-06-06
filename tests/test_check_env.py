@@ -11,7 +11,7 @@ class CheckEnvTest(unittest.TestCase):
         paths = check_env.required_checkpoint_paths()
 
         self.assertIn(Path("ckpt/mimi/config.json"), paths)
-        self.assertIn(Path("ckpt/v5/streamlip_v5_olmo_step_002000_infer.pt"), paths)
+        self.assertIn(Path("ckpt/v5/streamlip_v5_olmo_step_001500_infer.pt"), paths)
         self.assertIn(Path("ckpt/recon/streamlip_recon_timbrefix_step_002000.pt"), paths)
         self.assertTrue(all(not path.is_absolute() for path in paths))
 

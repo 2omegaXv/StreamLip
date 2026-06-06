@@ -40,7 +40,7 @@ def required_checkpoint_paths() -> list[Path]:
         Path("ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth"),
         Path("ckpt/speaker/resnet50-11ad3fa6.pth"),
         Path("ckpt/norm/latent_norm_stats.npz"),
-        Path("ckpt/v5/streamlip_v5_olmo_step_002000_infer.pt"),
+        Path("ckpt/v5/streamlip_v5_olmo_step_001500_infer.pt"),
         Path("ckpt/recon/streamlip_recon_timbrefix_step_002000.pt"),
         Path("ckpt/recon/streamlip_recon_residual_base_step_005000.pt"),
     ]

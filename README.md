@@ -63,7 +63,7 @@ ckpt/
 ├── streamlip-v5-lm/
 │   └── ...
 └── v5/
-    └── streamlip_v5_olmo_step_002000_infer.pt
+    └── streamlip_v5_olmo_step_001500_infer.pt
 ```
 
 Legacy v2/v3/v4, Mimi-code, teacher-cache, and sweep scripts are archived under
@@ -139,7 +139,7 @@ ckpt/streamlip-v5-lm
 ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth
 ckpt/speaker/resnet50-11ad3fa6.pth
 ckpt/norm/latent_norm_stats.npz
-ckpt/v5/streamlip_v5_olmo_step_002000_infer.pt
+ckpt/v5/streamlip_v5_olmo_step_001500_infer.pt
 ckpt/recon/streamlip_recon_timbrefix_step_002000.pt
 ckpt/recon/streamlip_recon_residual_base_step_005000.pt
 ```
@@ -149,7 +149,7 @@ Upload these files to `pancx/streamlip-audio-recon-ckpt-pub`:
 ```text
 ckpt/recon/streamlip_recon_timbrefix_step_002000.pt
 ckpt/recon/streamlip_recon_residual_base_step_005000.pt
-ckpt/v5/streamlip_v5_olmo_step_002000_infer.pt
+ckpt/v5/streamlip_v5_olmo_step_001500_infer.pt
 ckpt/streamlip-v5-lm/
 ckpt/norm/latent_norm_stats.npz
 ckpt/auto-avsr/vsr_trlrs2lrs3vox2avsp_base.pth
@@ -187,7 +187,7 @@ unset HF_ENDPOINT
 # export ALL_PROXY=socks5://127.0.0.1:7890
 
 .venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/recon recon --repo-type model
-.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/v5/streamlip_v5_olmo_step_002000_infer.pt v5/streamlip_v5_olmo_step_002000_infer.pt --repo-type model
+.venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/v5/streamlip_v5_olmo_step_001500_infer.pt v5/streamlip_v5_olmo_step_001500_infer.pt --repo-type model
 .venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/streamlip-v5-lm streamlip-v5-lm --repo-type model
 .venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/norm norm --repo-type model
 .venv/bin/hf upload "$STREAMLIP_CKPT_REPO" ckpt/auto-avsr auto-avsr --repo-type model
@@ -195,7 +195,15 @@ unset HF_ENDPOINT
 ```
 
 The uploaded V5 checkpoint is inference-only: it keeps `step` and `model`, and
-drops the optimizer state from the original training checkpoint.
+drops the optimizer state from the new step-1500 V5 training checkpoint. To regenerate
+it from the training checkpoint:
+
+```bash
+.venv/bin/python scripts/strip_v5_ckpt_for_infer.py \
+  --input runs/v5/v5_olmo_lr1e-6_ep50_eos_frame500_warmup0/step_001500.pt \
+  --output ckpt/v5/streamlip_v5_olmo_step_001500_infer.pt \
+  --overwrite
+```
 
 Verify the environment before running inference:
 
