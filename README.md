@@ -4,6 +4,9 @@ This worktree contains the current StreamLip deterministic audio reconstruction
 pipeline, with StreamLip V5 as the default visual-to-text branch for raw-video
 inference. The active script surface is intentionally small:
 
+Project page assets live under `docs/`. To publish with GitHub Pages, select
+`main` branch and `/docs` as the Pages source.
+
 ![StreamLip architecture](poster/assets/report_system_architecture.png)
 
 **Trump demo.** The example below is the checked-in Trump silent/reference demo

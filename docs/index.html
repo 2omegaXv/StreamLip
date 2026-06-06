@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StreamLip Audio Reconstruction</title>
+  <meta name="description" content="StreamLip reconstructs speech audio from silent face video with StreamLip V5 visual-text decoding and timbre-conditioned waveform reconstruction.">
+  <style>
+    :root {
+      --bg: #ffffff;
+      --surface: #f8fafc;
+      --ink: #111827;
+      --muted: #4b5563;
+      --line: #e5e7eb;
+      --blue: #1559d6;
+      --green: #167a3f;
+      --violet: #5b35b1;
+      --shadow: 0 18px 45px rgba(15, 23, 42, 0.10);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--bg);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    img,
+    video {
+      display: block;
+      max-width: 100%;
+    }
+
+    .shell {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid rgba(229, 231, 235, 0.9);
+      background: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(14px);
+    }
+
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 64px;
+      gap: 22px;
+    }
+
+    .brand {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    .nav-links a:hover {
+      color: var(--blue);
+    }
+
+    .hero {
+      padding: 66px 0 34px;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.04fr) minmax(360px, 0.96fr);
+      gap: 42px;
+      align-items: center;
+    }
+
+    .eyebrow {
+      margin: 0 0 14px;
+      color: var(--blue);
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    h1 {
+      margin: 0;
+      max-width: 780px;
+      font-size: clamp(42px, 6vw, 78px);
+      line-height: 0.98;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      margin: 22px 0 0;
+      max-width: 690px;
+      color: #374151;
+      font-size: clamp(17px, 2vw, 21px);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 28px;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 10px 16px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      font-size: 14px;
+      font-weight: 750;
+      background: #fff;
+    }
+
+    .button.primary {
+      border-color: var(--blue);
+      background: var(--blue);
+      color: #fff;
+    }
+
+    .hero-card {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .hero-card img {
+      width: 100%;
+      aspect-ratio: 16 / 10;
+      object-fit: cover;
+      background: #e5e7eb;
+    }
+
+    .hero-caption {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 15px 16px 16px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .pill {
+      flex: 0 0 auto;
+      border: 1px solid #bfdbfe;
+      border-radius: 999px;
+      padding: 4px 9px;
+      color: var(--blue);
+      background: #eff6ff;
+      font-weight: 750;
+    }
+
+    .section {
+      padding: 54px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 0.8fr) minmax(320px, 1.2fr);
+      gap: 34px;
+      align-items: start;
+      margin-bottom: 26px;
+    }
+
+    h2 {
+      margin: 0;
+      font-size: clamp(28px, 4vw, 44px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+
+    .section-head p,
+    .section-copy {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .metric-grid,
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .metric,
+    .feature,
+    .demo,
+    .callout {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .metric,
+    .feature {
+      padding: 20px;
+    }
+
+    .metric strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--blue);
+      font-size: 30px;
+      line-height: 1;
+    }
+
+    .metric span,
+    .feature p {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .feature h3,
+    .demo h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      letter-spacing: 0;
+    }
+
+    .diagram {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    .diagram img {
+      width: 100%;
+      background: #fff;
+    }
+
+    .diagram-caption {
+      padding: 13px 16px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 18px;
+    }
+
+    .demo-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .demo {
+      overflow: hidden;
+      background: var(--surface);
+    }
+
+    .demo video {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #111827;
+      object-fit: cover;
+    }
+
+    .demo-body {
+      padding: 14px 15px 16px;
+    }
+
+    .demo p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .code-block {
+      overflow-x: auto;
+      margin: 18px 0 0;
+      padding: 18px;
+      border: 1px solid #dbeafe;
+      border-radius: 8px;
+      background: #f8fbff;
+      color: #172554;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre;
+    }
+
+    .callout {
+      padding: 22px;
+      background: #fbfdfb;
+      border-color: #bbf7d0;
+    }
+
+    .callout h3 {
+      margin: 0 0 10px;
+      color: var(--green);
+      font-size: 19px;
+    }
+
+    .callout p {
+      margin: 0;
+      color: #36543f;
+    }
+
+    .link-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    .link-card {
+      min-height: 94px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .link-card strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .link-card span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    footer {
+      padding: 32px 0 42px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 900px) {
+      .hero-grid,
+      .section-head,
+      .two-col {
+        grid-template-columns: 1fr;
+      }
+
+      .metric-grid,
+      .feature-grid,
+      .demo-grid,
+      .link-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .nav-links {
+        display: none;
+      }
+    }
+
+    @media (max-width: 620px) {
+      .shell {
+        width: min(100% - 26px, 1180px);
+      }
+
+      .hero {
+        padding-top: 42px;
+      }
+
+      .metric-grid,
+      .feature-grid,
+      .demo-grid,
+      .link-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-caption {
+        display: block;
+      }
+
+      .pill {
+        display: inline-flex;
+        margin-top: 10px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <div class="shell nav-inner">
+      <a class="brand" href="#">StreamLip</a>
+      <div class="nav-links">
+        <a href="#method">Method</a>
+        <a href="#demo">Demo</a>
+        <a href="#pipeline">Pipeline</a>
+        <a href="#run">Run</a>
+        <a href="https://github.com/2omegaXv/StreamLip">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="shell hero-grid">
+      <div>
+        <p class="eyebrow">Silent video to speech reconstruction</p>
+        <h1>StreamLip Audio Reconstruction</h1>
+        <p class="lead">
+          StreamLip restores speech audio from silent face video with a self-trained
+          StreamLip V5 visual-text branch and timbre-conditioned deterministic waveform
+          reconstruction.
+        </p>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/2omegaXv/StreamLip">View Code</a>
+          <a class="button" href="#run">Run the Demo</a>
+          <a class="button" href="assets/report.pdf">Report</a>
+          <a class="button" href="assets/poster.pdf">Poster</a>
+        </div>
+      </div>
+      <div class="hero-card">
+        <img src="assets/trump_demo.gif" alt="Generated Trump silent-video reconstruction demo">
+        <div class="hero-caption">
+          <span>Trump silent/reference demo: restored speech audio is muxed back to the original face video.</span>
+          <span class="pill">Checked-in example</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="section">
+      <div class="shell">
+        <div class="metric-grid">
+          <div class="metric">
+            <strong>V5</strong>
+            <span>Self-trained visual-to-text branch used as the default raw-video path.</span>
+          </div>
+          <div class="metric">
+            <strong>3.04s</strong>
+            <span>Optional reference audio window for same-layout timbre conditioning.</span>
+          </div>
+          <div class="metric">
+            <strong>1 cmd</strong>
+            <span>Silent mp4 plus optional reference audio to generated voiced mp4.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="method">
+      <div class="shell">
+        <div class="section-head">
+          <h2>Why StreamLip</h2>
+          <p>
+            The system is not a pure vision-to-text-to-audio cascade. Text is useful
+            as a semantic condition, but audio quality is driven primarily by lip timing,
+            visual speech features, Mimi audio latents, and speaker/timbre conditions.
+            This makes the reconstruction less dependent on perfect transcript accuracy.
+          </p>
+        </div>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>Self-Trained V5 Branch</h3>
+            <p>StreamLip V5 consumes visual speech features and decodes text through an LM-based decoder with visual cross-attention.</p>
+          </div>
+          <div class="feature">
+            <h3>Deterministic Recon Head</h3>
+            <p>The audio branch predicts Mimi latent residuals directly instead of relying on a slow sampling or flow-matching trajectory.</p>
+          </div>
+          <div class="feature">
+            <h3>Timbre Conditioning</h3>
+            <p>A short reference audio segment provides speaker and prompt statistics, improving perceived voice consistency.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="pipeline">
+      <div class="shell">
+        <div class="section-head">
+          <h2>System Architecture</h2>
+          <p>
+            Silent video is normalized, lip features are extracted, StreamLip V5 provides
+            semantic text features, Mimi supplies the audio latent space, and the recon
+            head generates speech conditioned on visual, text, and timbre signals.
+          </p>
+        </div>
+        <div class="diagram">
+          <img src="assets/system_architecture.png" alt="StreamLip system architecture">
+          <div class="diagram-caption">StreamLip V5 and the reconstruction model form the default end-to-end inference path.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="shell two-col">
+        <div class="diagram">
+          <img src="assets/recon_vs_sampling.png" alt="Reconstruction method compared with sampling">
+          <div class="diagram-caption">Direct reconstruction keeps inference simple and stable for the current release.</div>
+        </div>
+        <div class="diagram">
+          <img src="assets/silent_ref_pipeline.png" alt="Silent reference audio pipeline">
+          <div class="diagram-caption">Reference mode places timbre audio into the same first-window prompt layout used by training.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="demo">
+      <div class="shell">
+        <div class="section-head">
+          <h2>Generated Examples</h2>
+          <p>
+            The Trump example is the primary checked-in silent/reference demo. Additional
+            short generated videos are included to show the same reconstruction pipeline
+            on non-Trump clips.
+          </p>
+        </div>
+        <div class="demo-grid">
+          <div class="demo">
+            <video controls playsinline preload="metadata" src="assets/trump_silent_ref_demo.mp4"></video>
+            <div class="demo-body">
+              <h3>Trump Silent/Reference Demo</h3>
+              <p>Silent input with a separate reference segment for timbre conditioning.</p>
+            </div>
+          </div>
+          <div class="demo">
+            <video controls playsinline preload="metadata" src="assets/demo_0001_0003.mp4"></video>
+            <div class="demo-body">
+              <h3>Generated Example A</h3>
+              <p>Post-prompt generated output from the raw-video pipeline.</p>
+            </div>
+          </div>
+          <div class="demo">
+            <video controls playsinline preload="metadata" src="assets/demo_0003_0017.mp4"></video>
+            <div class="demo-body">
+              <h3>Generated Example B</h3>
+              <p>Additional non-Trump reconstruction example.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="run">
+      <div class="shell">
+        <div class="section-head">
+          <h2>Run the Pipeline</h2>
+          <p>
+            The release uses local checkpoints under <code>ckpt/</code>. Our trained
+            weights are distributed through a project checkpoint repository, while public
+            Mimi and SmolLM2 dependencies can be restored from Hugging Face mirror.
+          </p>
+        </div>
+        <div class="callout">
+          <h3>Default one-command silent/reference demo</h3>
+          <p>After installing requirements and restoring checkpoints, this command reproduces the checked-in Trump-style reference workflow.</p>
+          <div class="code-block">.venv/bin/python \
+  scripts/run_raw_video_avsr_recon_pipeline.py \
+  --input data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4 \
+  --ref_audio data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4 \
+  --silent_input \
+  --exp trump_silent_ref_demo_full \
+  --force</div>
+        </div>
+        <div class="link-grid">
+          <a class="link-card" href="https://github.com/2omegaXv/StreamLip">
+            <strong>Repository</strong>
+            <span>Code, README, scripts, and tests.</span>
+          </a>
+          <a class="link-card" href="https://huggingface.co/pancx/streamlip-audio-recon-ckpt-pub">
+            <strong>Checkpoints</strong>
+            <span>Project-specific model bundle.</span>
+          </a>
+          <a class="link-card" href="assets/report.pdf">
+            <strong>Report</strong>
+            <span>Technical summary and experiments.</span>
+          </a>
+          <a class="link-card" href="assets/poster.pdf">
+            <strong>Poster</strong>
+            <span>Presentation poster PDF.</span>
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">
+      StreamLip Audio Reconstruction. Authors: Zihan Guo, Changxun Pan, Anqiao Fu.
+    </div>
+  </footer>
+</body>
+</html>
