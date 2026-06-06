@@ -4,6 +4,17 @@ This worktree contains the current StreamLip deterministic audio reconstruction
 pipeline, with StreamLip V5 as the default visual-to-text branch for raw-video
 inference. The active script surface is intentionally small:
 
+![StreamLip architecture](poster/assets/report_system_architecture.png)
+
+**Trump demo.** The example below is a generated post-prompt output from the
+current raw-video pipeline. The source clip is a Trump speech segment; the
+model reconstructs the spoken audio and muxes it back to the face video.
+
+![Trump generated demo](poster/assets/trump_demo.gif)
+
+The full mp4 examples are kept under `data/assets/demo_videos/`, including
+`0001_0003_pred_orig_post3s.mp4`, the source for the GIF above.
+
 ```text
 scripts/train_fm_avsr.py
 scripts/eval_fm_avsr.py
@@ -223,15 +234,15 @@ available with `--text_model avsr`.
 
 ### Video With Audio
 
-Run one input video end to end. The first 3.04 seconds of the input audio are
-used as the same-clip timbre/audio prompt and are removed from the listening
-output:
+Run one input video end to end. For a normal video with audio, the first 3.04
+seconds of the input audio are used as the same-clip timbre/audio prompt and
+are removed from the listening output:
 
 ```bash
 .venv/bin/python \
   scripts/run_raw_video_avsr_recon_pipeline.py \
-  --input data/trump.mov \
-  --exp trump_ckpt_default_verify \
+  --input /path/to/input_with_audio.mp4 \
+  --exp my_video_demo \
   --force
 ```
 
@@ -264,7 +275,10 @@ vis_reprocess_avsr/lip_avsr_crop_with_audio.mp4
 ```
 
 The first 3.04 seconds are used as same-clip audio/timbre prompt and are removed
-from the exported listening videos.
+from the exported listening videos. The local development file `data/trump.mov`
+is not committed because root-level `data/*.mov` and `data/*.mp4` files are
+treated as local raw inputs. Committed demo outputs live under
+`data/assets/demo_videos/`.
 
 ### Silent Reference Demo
 
@@ -282,10 +296,11 @@ data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4
 data/assets/trump_silent_ref_demo/trump_silent_ref_demo_full_pred_post3s.mp4
 ```
 
-The silent input is `data/trump.mov` with the final 3 seconds removed and all
-audio stripped. The reference file can be an audio file or a video file with
-audio. For best timbre control, use an unmasked segment from the same source
-video as `--ref_audio`; its first 3.04 seconds should contain valid speech.
+The checked-in silent input was prepared from a local Trump source video by
+removing its final 3 seconds and stripping all audio. The reference file can be
+an audio file or a video file with audio. For best timbre control, use an
+unmasked segment from the same source video as `--ref_audio`; its first 3.04
+seconds should contain valid speech.
 
 If `--silent_input` is used without `--ref_audio`, the pipeline keeps the video
 silent for preprocessing and uses the default zero audio prompt and zero timbre
@@ -340,36 +355,36 @@ The GUI calls the same `scripts/run_raw_video_avsr_recon_pipeline.py` backend.
 
 ## Verified Example
 
-The cleanup branch was verified with:
+The checked-in reproducible demo uses the silent/reference Trump assets:
 
 ```bash
 .venv/bin/python \
   scripts/run_raw_video_avsr_recon_pipeline.py \
-  --input data/trump.mov \
-  --exp trump_ckpt_default_verify \
+  --input data/assets/trump_silent_ref_demo/trump_silent_input_no_tail3s.mp4 \
+  --ref_audio data/assets/trump_silent_ref_demo/trump_ref_tail3s.mp4 \
+  --silent_input \
+  --exp trump_silent_ref_demo_full \
   --force
 ```
 
 Generated artifacts:
 
 ```text
-eval_out/trump_ckpt_default_verify/trump_ckpt_default_verify_pred_prompt3s_post3s.mp4
-eval_out/trump_ckpt_default_verify/trump_ckpt_default_verify_gt_mimi_post3s.mp4
-eval_out/trump_ckpt_default_verify/vis_reprocess_avsr/face_lip_avsr_side_by_side_with_audio.mp4
-eval_out/trump_ckpt_default_verify/processed/custom/trump_ckpt_default_verify/00001/streamlip_v5_text.txt
-eval_out/trump_ckpt_default_verify/processed/custom/trump_ckpt_default_verify/00001/smollm2_h_v5.npy
-eval_out/trump_ckpt_default_verify/recon_lipavsr_prompt3s/metrics.json
+eval_out/trump_silent_ref_demo_full/trump_silent_ref_demo_full_pred_post3s.mp4
+eval_out/trump_silent_ref_demo_full/vis_reprocess_avsr/face_lip_avsr_side_by_side_with_audio.mp4
+eval_out/trump_silent_ref_demo_full/processed/custom/trump_silent_ref_demo_full/00001/streamlip_v5_text.txt
+eval_out/trump_silent_ref_demo_full/processed/custom/trump_silent_ref_demo_full/00001/smollm2_h_v5.npy
+eval_out/trump_silent_ref_demo_full/recon_lipavsr_prompt3s/metrics.json
 ```
 
-Observed metrics:
+The repository also includes five small generated mp4 examples:
 
 ```text
-T_a: 371
-metric_start_frame: 38
-text_model: v5
-mean_corr: 0.3862892466
-mean_mse: 0.8043726087
-mean_mae: 0.6964216828
+data/assets/demo_videos/0000_0001_pred_orig_post3s.mp4
+data/assets/demo_videos/0001_0003_pred_orig_post3s.mp4
+data/assets/demo_videos/0003_0017_pred_orig_post3s.mp4
+data/assets/demo_videos/0018_pred_orig.mp4
+data/assets/demo_videos/pred_orig_video_no_audio_input_post3s.mp4
 ```
 
 ## Tests
