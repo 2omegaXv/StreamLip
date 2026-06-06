@@ -152,11 +152,17 @@
       box-shadow: var(--shadow);
     }
 
+    .media-frame {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      overflow: hidden;
+      background: #eef2f7;
+    }
+
     .hero-card img {
       width: 100%;
-      aspect-ratio: 16 / 10;
+      height: 100%;
       object-fit: cover;
-      background: #e5e7eb;
     }
 
     .hero-caption {
@@ -287,8 +293,8 @@
 
     .demo video {
       width: 100%;
-      aspect-ratio: 16 / 9;
-      background: #111827;
+      height: 100%;
+      background: #eef2f7;
       object-fit: cover;
     }
 
@@ -443,7 +449,9 @@
         </div>
       </div>
       <div class="hero-card">
-        <img src="assets/trump_demo.gif" alt="Generated Trump silent-video reconstruction demo">
+        <div class="media-frame">
+          <img src="assets/trump_demo.gif" alt="Generated Trump silent-video reconstruction demo">
+        </div>
         <div class="hero-caption">
           <span>Trump silent/reference demo: restored speech audio is muxed back to the original face video.</span>
           <span class="pill">Checked-in example</span>
@@ -535,31 +543,64 @@
         <div class="section-head">
           <h2>Generated Examples</h2>
           <p>
-            The Trump example is the primary checked-in silent/reference demo. Additional
-            short generated videos are included to show the same reconstruction pipeline
+            The Trump example is the primary checked-in silent/reference demo. Five
+            additional short generated videos show the same reconstruction pipeline
             on non-Trump clips.
           </p>
         </div>
         <div class="demo-grid">
           <div class="demo">
-            <video controls playsinline preload="metadata" src="assets/trump_silent_ref_demo.mp4"></video>
+            <div class="media-frame">
+              <video controls playsinline preload="metadata" src="assets/trump_silent_ref_demo.mp4"></video>
+            </div>
             <div class="demo-body">
               <h3>Trump Silent/Reference Demo</h3>
               <p>Silent input with a separate reference segment for timbre conditioning.</p>
             </div>
           </div>
           <div class="demo">
-            <video controls playsinline preload="metadata" src="assets/demo_0001_0003.mp4"></video>
+            <div class="media-frame">
+              <video controls playsinline preload="metadata" src="assets/demo_0001_0003.mp4"></video>
+            </div>
             <div class="demo-body">
               <h3>Generated Example A</h3>
-              <p>Post-prompt generated output from the raw-video pipeline.</p>
+              <p>Longer post-prompt generated output from the raw-video pipeline.</p>
             </div>
           </div>
           <div class="demo">
-            <video controls playsinline preload="metadata" src="assets/demo_0003_0017.mp4"></video>
+            <div class="media-frame">
+              <video controls playsinline preload="metadata" src="assets/demo_0003_0017.mp4"></video>
+            </div>
             <div class="demo-body">
               <h3>Generated Example B</h3>
               <p>Additional non-Trump reconstruction example.</p>
+            </div>
+          </div>
+          <div class="demo">
+            <div class="media-frame">
+              <video controls playsinline preload="metadata" src="assets/demo_0000_0001.mp4"></video>
+            </div>
+            <div class="demo-body">
+              <h3>Generated Example C</h3>
+              <p>Short post-prompt generated output from the release pipeline.</p>
+            </div>
+          </div>
+          <div class="demo">
+            <div class="media-frame">
+              <video controls playsinline preload="metadata" src="assets/demo_0018.mp4"></video>
+            </div>
+            <div class="demo-body">
+              <h3>Generated Example D</h3>
+              <p>Additional generated face-video output with restored audio.</p>
+            </div>
+          </div>
+          <div class="demo">
+            <div class="media-frame">
+              <video controls playsinline preload="metadata" src="assets/demo_hrx_reprocess.mp4"></video>
+            </div>
+            <div class="demo-body">
+              <h3>Generated Example E</h3>
+              <p>HRX reprocessed example using the current visual preprocessing path.</p>
             </div>
           </div>
         </div>

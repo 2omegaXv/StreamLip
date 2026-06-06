@@ -42,6 +42,7 @@ to show that language-model text quality is not the limiting factor for audio
 reconstruction. The strongest checkpoint reaches 0.58184180 mean correlation on
 the LRS3 validation split and supports raw-video and silent-video inference
 with optional reference audio.
+Project page: \url{https://2omegaxv.github.io/StreamLip/}.
 Code: \url{https://github.com/2omegaXv/StreamLip}.
 \end{abstract}
 
@@ -314,17 +315,17 @@ audio reconstructor remains robust even when transcript accuracy is imperfect.
 StreamLip V5 uses a two-stage design:
 
 \begin{equation}
-    \text{lip frames}
-    \xrightarrow{\text{frozen visual speech encoder}}
+    \mathrm{lip\ frames}
+    \xrightarrow{\mathrm{frozen\ visual\ speech\ encoder}}
     e^v_{1:T} \in \mathbb{R}^{T \times 768}
-    \xrightarrow{\text{proj} + \text{Gated Cross-Attn}}
-    \text{OLMo-1B}~\cite{groeneveld2024olmo}
+    \xrightarrow{\mathrm{proj} + \mathrm{Gated\ Cross\mbox{-}Attn}}
+    \mathrm{OLMo\mbox{-}1B}
     \longrightarrow \hat{w}_{1:N}
 \end{equation}
 
 The visual encoder is the frozen Conformer-style visual speech encoder used by
 our StreamLip preprocessing path. Its output features are projected to the
-OLMo-1B hidden dimension (2048) and injected into every 4th transformer layer
+OLMo-1B~\cite{groeneveld2024olmo} hidden dimension (2048) and injected into every 4th transformer layer
 via Flamingo-style Gated Cross-Attention~\cite{alayrac2022flamingo}:
 \begin{equation}
     x \leftarrow x + \tanh(\alpha) \cdot \mathrm{CrossAttn}(x,\, e^v),
@@ -624,8 +625,9 @@ is listed as a model issue to fix.
 \section{Reproducibility Interfaces}
 %======================================================================
 
-The code and models are available at
-\url{https://github.com/2omegaXv/StreamLip}.
+The public project page is available at
+\url{https://2omegaxv.github.io/StreamLip/}. The code and model instructions
+are available at \url{https://github.com/2omegaXv/StreamLip}.
 
 The primary command-line entry point is:
 \begin{verbatim}

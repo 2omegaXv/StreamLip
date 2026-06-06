@@ -1,5 +1,7 @@
 # StreamLip Audio Reconstruction
 
+**Project page:** https://2omegaxv.github.io/StreamLip/
+
 This worktree contains the current StreamLip deterministic audio reconstruction
 pipeline, with StreamLip V5 as the default visual-to-text branch for raw-video
 inference. The active script surface is intentionally small:
@@ -389,7 +391,7 @@ data/assets/demo_videos/0000_0001_pred_orig_post3s.mp4
 data/assets/demo_videos/0001_0003_pred_orig_post3s.mp4
 data/assets/demo_videos/0003_0017_pred_orig_post3s.mp4
 data/assets/demo_videos/0018_pred_orig.mp4
-data/assets/demo_videos/pred_orig_video_no_audio_input_post3s.mp4
+data/assets/demo_videos/hrx_pred_prompt3s_post3s_reprocess_avsr.mp4
 ```
 
 ## Tests

@@ -10,7 +10,7 @@ not raw training data.
 | `0001_0003_pred_orig_post3s.mp4` | 17.60 s | Generated output, post-prompt region only. |
 | `0003_0017_pred_orig_post3s.mp4` | 3.80 s | Generated output, post-prompt region only. |
 | `0018_pred_orig.mp4` | 4.52 s | Generated output. |
-| `pred_orig_video_no_audio_input_post3s.mp4` | 3.04 s | Generated output for a no-audio input demo. |
+| `hrx_pred_prompt3s_post3s_reprocess_avsr.mp4` | 15.84 s | HRX generated output with current visual preprocessing. |
 
 The files are 224x224 mp4 exports produced by the current StreamLip raw-video
 pipeline. Larger raw source videos such as `data/trump.mov` are treated as local
